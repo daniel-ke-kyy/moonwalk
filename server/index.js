@@ -146,13 +146,15 @@ app.post('/api/open/generate', async (req, res) => {
     validateSelectedSections(session, settings.selectedSectionIndexes)
 
     const openQuestionSet = await generateOpenQuestions(session, settings)
+    const feedbackContext = buildFeedbackContext(session, settings)
     session.openQuestionSet = {
       ...openQuestionSet,
       writingGoal: settings.writingGoal,
       selectedSectionIndexes: settings.selectedSectionIndexes,
+      feedbackContext,
     }
     session.openFeedback = null
-    res.json(openQuestionSet)
+    res.json({ ...openQuestionSet, feedbackContext })
   } catch (error) {
     res.status(400).json({ error: toUserError(error) })
   }
@@ -165,17 +167,26 @@ app.post('/api/open/feedback', async (req, res) => {
     }
 
     const settings = normalizeOpenFeedbackSettings(req.body)
-    const session = getSession(settings.sessionId)
-    if (!session.openQuestionSet?.questions?.length) {
+    const session = sessions.get(settings.sessionId)
+    const fallback = settings.feedbackContext
+    if (!session && !fallback) {
+      throw new Error('当前材料会话已过期，请回到摘要页重新生成开放式问题。')
+    }
+
+    const questionSet = session?.openQuestionSet || fallback?.questionSet
+    if (!questionSet?.questions?.length) {
       throw new Error('还没有生成开放式问题，请先回到摘要页生成问题。')
     }
 
-    const feedback = await generateOpenFeedback(session, {
-      writingGoal: session.openQuestionSet.writingGoal,
-      questions: session.openQuestionSet.questions,
+    const feedback = await generateOpenFeedback(session || fallback, {
+      writingGoal: questionSet.writingGoal || fallback?.writingGoal,
+      questions: questionSet.questions,
       answers: settings.answers,
+      fileInfo: fallback?.fileInfo,
+      prepared: fallback?.prepared,
+      summary: fallback?.summary,
     })
-    session.openFeedback = feedback
+    if (session) session.openFeedback = feedback
     res.json(feedback)
   } catch (error) {
     res.status(400).json({ error: toUserError(error) })
@@ -281,9 +292,10 @@ function normalizeOpenFeedbackSettings(body) {
         Object.entries(body.answers).map(([key, value]) => [String(key), String(value || '').trim()]),
       )
     : {}
+  const feedbackContext = normalizeFeedbackContext(body.feedbackContext)
 
   if (!sessionId) throw new Error('缺少材料会话。')
-  return { sessionId, answers }
+  return { sessionId, answers, feedbackContext }
 }
 
 function validateSelectedSections(session, selectedSectionIndexes) {
@@ -295,6 +307,49 @@ function validateSelectedSections(session, selectedSectionIndexes) {
   const invalid = selectedSectionIndexes.some((index) => index < 0 || index >= sectionCount)
   if (invalid) {
     throw new Error('追问范围无效，请重新选择。')
+  }
+}
+
+function buildFeedbackContext(session, settings) {
+  return {
+    fileInfo: session.fileInfo,
+    prepared: session.prepared,
+    summary: session.summary,
+    writingGoal: settings.writingGoal,
+    questionSet: null,
+  }
+}
+
+function normalizeFeedbackContext(value) {
+  if (!value || typeof value !== 'object') return null
+  const questionSet = value.questionSet && typeof value.questionSet === 'object' ? value.questionSet : null
+  const questions = Array.isArray(questionSet?.questions) ? questionSet.questions : []
+  const prepared = value.prepared && typeof value.prepared === 'object' ? value.prepared : null
+  const summary = value.summary && typeof value.summary === 'object' ? value.summary : null
+  const fileInfo = value.fileInfo && typeof value.fileInfo === 'object' ? value.fileInfo : null
+  if (!questions.length || !prepared?.textContext || !summary || !fileInfo) return null
+
+  return {
+    fileInfo: {
+      originalName: String(fileInfo.originalName || '未命名材料'),
+      extension: String(fileInfo.extension || ''),
+      size: Number(fileInfo.size) || 0,
+      pageCount: fileInfo.pageCount === null ? null : Number(fileInfo.pageCount) || null,
+      slideCount: fileInfo.slideCount === null ? null : Number(fileInfo.slideCount) || null,
+    },
+    prepared: {
+      textContext: String(prepared.textContext || ''),
+      processingNotes: Array.isArray(prepared.processingNotes)
+        ? prepared.processingNotes.map(String)
+        : [],
+    },
+    summary,
+    writingGoal: String(value.writingGoal || ''),
+    questionSet: {
+      materialType: String(questionSet.materialType || '未识别材料类型'),
+      writingGoal: String(questionSet.writingGoal || value.writingGoal || ''),
+      questions,
+    },
   }
 }
 

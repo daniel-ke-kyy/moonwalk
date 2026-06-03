@@ -105,6 +105,22 @@ type OpenQuestion = {
 type OpenQuestionSet = {
   materialType: string
   questions: OpenQuestion[]
+  feedbackContext?: FeedbackContext
+}
+
+type FeedbackContext = {
+  fileInfo: FileInfo
+  prepared: {
+    textContext: string
+    processingNotes: string[]
+  }
+  summary: MaterialSummary
+  writingGoal: string
+  questionSet: {
+    materialType: string
+    writingGoal: string
+    questions: OpenQuestion[]
+  } | null
 }
 
 type OpenFeedback = {
@@ -277,7 +293,7 @@ function App() {
           selectedSectionIndexes,
         }),
       })
-      setOpenQuestionSet(data)
+      setOpenQuestionSet(withFeedbackQuestionSet(data, writingGoal))
       setOpenFeedback(null)
       setOpenAnswers({})
       setCurrentIndex(0)
@@ -312,6 +328,7 @@ function App() {
         body: JSON.stringify({
           sessionId: uploadResult.sessionId,
           answers: openAnswers,
+          feedbackContext: withFeedbackQuestionSet(openQuestionSet, writingGoal).feedbackContext,
         }),
       })
       setOpenFeedback(data)
@@ -1309,6 +1326,22 @@ function sameAnswerSet(left: OptionId[], right: OptionId[]) {
 
 function formatAnswer(answer: OptionId[]) {
   return answer.length ? [...answer].sort().join('、') : '未作答'
+}
+
+function withFeedbackQuestionSet(questionSet: OpenQuestionSet, writingGoal: string): OpenQuestionSet {
+  if (!questionSet.feedbackContext) return questionSet
+  return {
+    ...questionSet,
+    feedbackContext: {
+      ...questionSet.feedbackContext,
+      writingGoal,
+      questionSet: {
+        materialType: questionSet.materialType,
+        writingGoal,
+        questions: questionSet.questions,
+      },
+    },
+  }
 }
 
 function formatFileSize(size: number) {

@@ -211,6 +211,9 @@ export async function generateOpenFeedback(session, settings) {
     sourceRef: question.sourceRef,
     userAnswer: settings.answers[question.id] || '',
   }))
+  const fileInfo = settings.fileInfo || session.fileInfo
+  const prepared = settings.prepared || session.prepared
+  const summary = settings.summary || session.summary
 
   const payload = await callDeepSeek({
     temperature: 0.35,
@@ -221,18 +224,18 @@ export async function generateOpenFeedback(session, settings) {
         content:
           '你是中文批判性阅读反馈导师。你的反馈要直接、批判、具体、不客套，只评价文本与回答是否补足论证，不攻击作者本人。必须只输出有效 JSON。',
       },
-      {
-        role: 'user',
-        content: `请基于材料、开放式问题和用户回答生成诊断反馈，并只返回 JSON。
+	      {
+	        role: 'user',
+	        content: `请基于材料、开放式问题和用户回答生成诊断反馈，并只返回 JSON。
 
-材料文件：${session.fileInfo.originalName}
-处理说明：${session.prepared.processingNotes.join('；')}
+	材料文件：${fileInfo.originalName}
+	处理说明：${prepared.processingNotes.join('；')}
 
-材料文本：
-${session.prepared.textContext}
+	材料文本：
+	${prepared.textContext}
 
-用户确认的材料摘要：
-${JSON.stringify(session.summary, null, 2)}
+	用户确认的材料摘要：
+	${JSON.stringify(summary, null, 2)}
 
 用户写作目标：
 ${settings.writingGoal}
