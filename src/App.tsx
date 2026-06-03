@@ -271,10 +271,6 @@ function App() {
   async function handleGenerateOpen(event: FormEvent) {
     event.preventDefault()
     if (!uploadResult) return
-    if (!writingGoal.trim()) {
-      setError('请先填写写作目标。')
-      return
-    }
     if (uploadResult.summary.sections.length > 0 && selectedSectionIndexes.length === 0) {
       setError('请至少选择一个追问范围。')
       return
@@ -358,6 +354,22 @@ function App() {
     setMissingIds([])
   }
 
+  function backToSummaryFromResult() {
+    setError('')
+    setMissingIds([])
+    setCurrentIndex(0)
+    if (assessmentMode === 'knowledge') {
+      setQuiz(null)
+      setAnswers({})
+    } else {
+      setOpenQuestionSet(null)
+      setOpenFeedback(null)
+      setOpenAnswers({})
+    }
+    setStep('summary')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
   return (
     <main className="app-shell">
       <TopBar currentStep={step} />
@@ -432,6 +444,7 @@ function App() {
         <ResultView
           items={resultItems}
           wrongItems={wrongItems}
+          onBackToSummary={backToSummaryFromResult}
           onRestart={resetAll}
         />
       )}
@@ -442,6 +455,7 @@ function App() {
           answers={openAnswers}
           feedback={openFeedback}
           onRevise={() => setStep('quiz')}
+          onBackToSummary={backToSummaryFromResult}
           onRestart={resetAll}
         />
       )}
@@ -814,12 +828,11 @@ function SummaryView({
           ) : (
             <form className="settings-form" onSubmit={onGenerateOpen}>
               <label className="field-block">
-                <span>写作目标</span>
+                <span>问题方向</span>
                 <textarea
                   value={writingGoal}
                   onChange={(event) => setWritingGoal(event.target.value)}
-                  placeholder="例如：说服投资人相信这个方案的市场可行性"
-                  required
+                  placeholder="可选：例如从论证漏洞、人物动机、商业可行性、反方视角等角度追问"
                 />
               </label>
 
@@ -1104,10 +1117,12 @@ function OpenQuestionView({
 function ResultView({
   items,
   wrongItems,
+  onBackToSummary,
   onRestart,
 }: {
   items: Array<{ question: Question; index: number; userAnswer: OptionId[]; correct: boolean }>
   wrongItems: Array<{ question: Question; index: number; userAnswer: OptionId[]; correct: boolean }>
+  onBackToSummary: () => void
   onRestart: () => void
 }) {
   return (
@@ -1118,10 +1133,16 @@ function ResultView({
           <h1>{wrongItems.length === 0 ? '全部答对' : `有 ${wrongItems.length} 道题需要回看`}</h1>
           <p>多选题按完全一致判断正确；下面可以查看错题和所有题目的解析。</p>
         </div>
-        <button className="primary-button" onClick={onRestart}>
-          <RefreshCcw size={17} />
-          重新上传
-        </button>
+        <div className="result-actions">
+          <button className="secondary-button" onClick={onBackToSummary}>
+            <ArrowLeft size={17} />
+            返回确认摘要
+          </button>
+          <button className="primary-button" onClick={onRestart}>
+            <RefreshCcw size={17} />
+            重新上传
+          </button>
+        </div>
       </div>
 
       <section className="panel">
@@ -1152,12 +1173,14 @@ function ResultView({
           >
             <div className="analysis-top">
               <span>第 {item.index + 1} 题 · {item.question.type === 'single' ? '单选' : '多选'}</span>
-              <strong>{item.correct ? '回答正确' : '回答错误'}</strong>
             </div>
-            <h2>{item.question.stem}</h2>
+            <div className="analysis-title-row">
+              <h2>{item.question.stem}</h2>
+              <CorrectnessBadge correct={item.correct} />
+            </div>
             <div className="answer-lines">
-              <p>你的答案：{formatAnswer(item.userAnswer)}</p>
-              <p>正确答案：{formatAnswer(item.question.answer)}</p>
+              <p>你的答案：{formatAnswerWithText(item.userAnswer, item.question.options)}</p>
+              <p>正确答案：{formatAnswerWithText(item.question.answer, item.question.options)}</p>
             </div>
             <p className="explanation">{item.question.explanation}</p>
             {item.question.sourceHint && <small>{item.question.sourceHint}</small>}
@@ -1173,12 +1196,14 @@ function OpenResultView({
   answers,
   feedback,
   onRevise,
+  onBackToSummary,
   onRestart,
 }: {
   questionSet: OpenQuestionSet
   answers: OpenAnswers
   feedback: OpenFeedbackResponse
   onRevise: () => void
+  onBackToSummary: () => void
   onRestart: () => void
 }) {
   const feedbackById = new Map(feedback.feedback.map((item) => [item.questionId, item]))
@@ -1196,6 +1221,10 @@ function OpenResultView({
           <button className="secondary-button" onClick={onRevise}>
             <ArrowLeft size={17} />
             返回修改
+          </button>
+          <button className="secondary-button" onClick={onBackToSummary}>
+            <ArrowLeft size={17} />
+            返回确认摘要
           </button>
           <button className="primary-button" onClick={onRestart}>
             <RefreshCcw size={17} />
@@ -1292,6 +1321,15 @@ function BulletList({ items, fallback }: { items: string[]; fallback: string }) 
   )
 }
 
+function CorrectnessBadge({ correct }: { correct: boolean }) {
+  return (
+    <div className={`correctness-badge ${correct ? 'correct' : 'wrong'}`}>
+      <span>是否正确：</span>
+      <i aria-label={correct ? '正确' : '错误'}>{correct ? '✓' : '✕'}</i>
+    </div>
+  )
+}
+
 function ErrorNotice({ message }: { message: string }) {
   return (
     <div className="error-notice">
@@ -1324,8 +1362,13 @@ function sameAnswerSet(left: OptionId[], right: OptionId[]) {
   return a === b
 }
 
-function formatAnswer(answer: OptionId[]) {
-  return answer.length ? [...answer].sort().join('、') : '未作答'
+function formatAnswerWithText(answer: OptionId[], options: Question['options']) {
+  if (!answer.length) return '未作答'
+  const optionMap = new Map(options.map((option) => [option.id, option.text]))
+  return [...answer]
+    .sort()
+    .map((id) => `${id}. ${optionMap.get(id) || '未找到对应选项内容'}`)
+    .join('；')
 }
 
 function withFeedbackQuestionSet(questionSet: OpenQuestionSet, writingGoal: string): OpenQuestionSet {

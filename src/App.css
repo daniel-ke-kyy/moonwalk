@@ -920,6 +920,59 @@ legend {
   font-size: 19px;
 }
 
+.analysis-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.analysis-title-row h2 {
+  min-width: 0;
+}
+
+.correctness-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+  min-height: 38px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.correctness-badge.correct {
+  color: #2e6f46;
+  background: #effaf2;
+  border: 1px solid #c8e8d2;
+}
+
+.correctness-badge.wrong {
+  color: #a23d2c;
+  background: #fff0ea;
+  border: 1px solid #efc3b5;
+}
+
+.correctness-badge i {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  font-family: "Bradley Hand", "Comic Sans MS", "Segoe Print", cursive;
+  font-size: 29px;
+  font-style: normal;
+  font-weight: 900;
+  line-height: 1;
+  transform: rotate(-8deg);
+}
+
+.correctness-badge.wrong i {
+  transform: rotate(7deg);
+}
+
 .open-analysis-card.answered-open {
   border-color: #d6dcc9;
 }

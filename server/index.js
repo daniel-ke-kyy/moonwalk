@@ -273,9 +273,6 @@ function normalizeOpenQuestionSettings(body) {
   if (!Number.isInteger(questionCount) || questionCount < OPEN_QUESTION_MIN || questionCount > OPEN_QUESTION_MAX) {
     throw new Error(`开放式问题数量必须在 ${OPEN_QUESTION_MIN} 到 ${OPEN_QUESTION_MAX} 个之间。`)
   }
-  if (!writingGoal) {
-    throw new Error('请填写写作目标。')
-  }
 
   return {
     sessionId,

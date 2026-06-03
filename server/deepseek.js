@@ -164,8 +164,8 @@ ${session.prepared.textContext}
 用户确认的材料摘要：
 ${JSON.stringify(session.summary, null, 2)}
 
-用户写作目标：
-${settings.writingGoal}
+用户问题方向（可选）：
+${settings.writingGoal || '用户未填写，请你自主选择最值得追问的方向与角度。'}
 
 用户选择的追问范围：
 ${JSON.stringify(selectedSections, null, 2)}
@@ -174,6 +174,7 @@ ${JSON.stringify(selectedSections, null, 2)}
 - 自动判断材料类型，例如论文、作文、商业方案、读书报告、剧本、策划案、演讲稿等。
 - 生成 ${settings.questionCount} 个开放式问题。
 - 每个问题都必须针对材料中的具体论点、叙事选择、证据缺口、逻辑跳跃、概念含混、反方视角或遗漏前提。
+- 如果用户填写了问题方向，优先沿这个方向生成问题；如果未填写，由你自主选择最能暴露文本问题的提问角度。
 - 问题必须一针见血，不要生成“你怎么看”“请谈谈”这类空泛问题。
 - 不要判断对错，不要给选择题选项。
 - sourceRef 必须引用原文位置。能识别章节、页码或幻灯片时写清楚；否则写“原文片段附近”并给出短摘录。
@@ -237,8 +238,8 @@ export async function generateOpenFeedback(session, settings) {
 	用户确认的材料摘要：
 	${JSON.stringify(summary, null, 2)}
 
-用户写作目标：
-${settings.writingGoal}
+	用户问题方向（可选）：
+	${settings.writingGoal || '用户未填写，由 AI 自主选择追问方向。'}
 
 开放式问题与用户回答：
 ${JSON.stringify(answerItems, null, 2)}
