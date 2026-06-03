@@ -1136,7 +1136,7 @@ function ResultView({
         <div className="result-actions">
           <button className="secondary-button" onClick={onBackToSummary}>
             <ArrowLeft size={17} />
-            返回确认摘要
+            返回题目生成
           </button>
           <button className="primary-button" onClick={onRestart}>
             <RefreshCcw size={17} />
@@ -1224,7 +1224,7 @@ function OpenResultView({
           </button>
           <button className="secondary-button" onClick={onBackToSummary}>
             <ArrowLeft size={17} />
-            返回确认摘要
+            返回题目生成
           </button>
           <button className="primary-button" onClick={onRestart}>
             <RefreshCcw size={17} />
