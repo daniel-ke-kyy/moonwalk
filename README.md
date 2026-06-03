@@ -66,7 +66,7 @@ cloudflared tunnel --url http://localhost:5174
 
 推荐配置：
 
-- Build Command: `npm ci && npm run build`
+- Build Command: `npm ci --include=dev && npm run build`
 - Start Command: `npm run start`
 - Health Check Path: `/api/health`
 - Environment:

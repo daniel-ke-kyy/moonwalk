@@ -2,7 +2,7 @@ services:
   - type: web
     name: moonwalk
     runtime: node
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm run start
     healthCheckPath: /api/health
     envVars:
