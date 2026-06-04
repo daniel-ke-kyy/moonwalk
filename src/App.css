@@ -212,6 +212,7 @@ h2 {
 }
 
 .upload-panel,
+.ppt-entry-panel,
 .panel,
 .analysis-card {
   background: rgba(255, 255, 255, 0.78);
@@ -247,7 +248,6 @@ h2 {
 
 .ppt-entry-panel {
   justify-content: center;
-  background: rgba(255, 255, 255, 0.78);
 }
 
 .ppt-entry-panel h2 {
