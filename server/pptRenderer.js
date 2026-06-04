@@ -23,7 +23,9 @@ export async function convertPptxToPdf(pptxPath, outputDir) {
   const sourcePath = await ensurePptxExtension(pptxPath, outputDir)
   const profileDir = path.join(outputDir, `lo-profile-${Date.now()}-${Math.random().toString(16).slice(2)}`)
   await mkdir(profileDir, { recursive: true })
-  await execFileAsync('soffice', [
+  let result = null
+  try {
+    result = await execFileAsync('soffice', [
     '--headless',
     '--nologo',
     '--nofirststartwizard',
@@ -33,7 +35,10 @@ export async function convertPptxToPdf(pptxPath, outputDir) {
     '--outdir',
     outputDir,
     sourcePath,
-  ], { timeout: renderTimeoutMs })
+    ], { timeout: renderTimeoutMs })
+  } catch (error) {
+    throw new Error(`LibreOffice 转换 PPTX 到 PDF 失败：${formatCommandError(error)}`)
+  }
 
   const expectedPath = path.join(outputDir, `${path.basename(sourcePath, path.extname(sourcePath))}.pdf`)
   if (existsSync(expectedPath)) return expectedPath
@@ -41,7 +46,9 @@ export async function convertPptxToPdf(pptxPath, outputDir) {
   const files = await readdir(outputDir)
   const pdfFile = files.find((file) => file.toLowerCase().endsWith('.pdf'))
   if (!pdfFile) {
-    throw new Error('PPTX 已生成，但当前环境暂时无法转换出 PDF 预览。')
+    const commandOutput = [result?.stderr, result?.stdout].filter(Boolean).join('\n').replace(/\s+/g, ' ').slice(0, 500)
+    const visibleFiles = files.filter((file) => !file.startsWith('lo-profile-')).join(', ') || '无输出文件'
+    throw new Error(`PPTX 已生成，但当前环境暂时无法转换出 PDF 预览。LibreOffice 输出：${commandOutput || '无'}；目录文件：${visibleFiles}`)
   }
   return path.join(outputDir, pdfFile)
 }

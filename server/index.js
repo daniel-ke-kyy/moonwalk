@@ -780,15 +780,32 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   }
 
   const generatedPptxPath = await applyTemplateFillPlan(mainTemplate.path, planPath, pptxPath)
-  const rendered = await renderDocumentToPreviews(generatedPptxPath, previewDir, { prefix: 'slide', dpi: 128 })
   const plan = templateFillPlanToPptPlan(fillPlan, mainTemplate.originalName || 'Moonwalk PPT')
+  let pdfPath = null
+  let previewPaths = []
+  let previewSource = 'template-fill'
+  let previewFallbackReason = ''
+  try {
+    const rendered = await renderDocumentToPreviews(generatedPptxPath, previewDir, { prefix: 'slide', dpi: 128 })
+    pdfPath = rendered.pdfPath
+    previewPaths = rendered.previewPaths
+  } catch (error) {
+    previewSource = 'fallback'
+    previewFallbackReason = toUserError(error)
+    console.warn(`PPT Master template-fill PPTX 预览转换失败，改用普通生成器生成预览：${previewFallbackReason}`)
+    const fallbackPreview = await renderFallbackPreviewForTemplateFill(session, plan, outputDir, mainTemplate)
+    previewPaths = fallbackPreview.previewPaths
+  }
+
   session.plan = plan
   session.output = {
     versionId,
     engine: 'template-fill',
     pptxPath: generatedPptxPath,
-    pdfPath: rendered.pdfPath,
-    previewPaths: rendered.previewPaths,
+    pdfPath,
+    previewPaths,
+    previewSource,
+    previewFallbackReason,
     generatedAt: new Date().toISOString(),
     templateFill: {
       checkSummary,
@@ -796,6 +813,27 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
       planPath,
       checkPath,
     },
+  }
+}
+
+async function renderFallbackPreviewForTemplateFill(session, plan, outputDir, mainTemplate) {
+  const fallbackDir = path.join(outputDir, 'preview-fallback')
+  await mkdir(fallbackDir, { recursive: true })
+  const fallbackPptxPath = path.join(fallbackDir, 'moonwalk-preview-fallback.pptx')
+  await createPptxFromPlan({
+    plan,
+    outputPath: fallbackPptxPath,
+    templateAssets: mainTemplate?.extension === '.pptx' ? mainTemplate.assets : [],
+    settings: {
+      mode: session.mode,
+      pptType: session.pptType,
+      master: null,
+    },
+  })
+  const rendered = await renderDocumentToPreviews(fallbackPptxPath, fallbackDir, { prefix: 'slide', dpi: 128 })
+  return {
+    pdfPath: rendered.pdfPath,
+    previewPaths: rendered.previewPaths,
   }
 }
 
@@ -885,6 +923,8 @@ function serializePptSession(session) {
       ? {
           generatedAt: session.output.generatedAt,
           engine: session.output.engine || 'fallback',
+          previewSource: session.output.previewSource || session.output.engine || 'fallback',
+          previewFallbackReason: session.output.previewFallbackReason || '',
           previewUrls: session.output.previewPaths.map((filePath) => toUploadFileUrl(filePath)),
           pptxDownloadUrl: `/api/ppt/${session.id}/download/pptx`,
           pdfDownloadUrl: session.output.pdfPath ? `/api/ppt/${session.id}/download/pdf` : null,

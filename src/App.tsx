@@ -237,6 +237,8 @@ type PptSessionResponse = {
   output: {
     generatedAt: string
     engine?: 'template-fill' | 'fallback'
+    previewSource?: 'template-fill' | 'fallback'
+    previewFallbackReason?: string
     previewUrls: string[]
     pptxDownloadUrl: string
     pdfDownloadUrl: string | null
@@ -2307,7 +2309,9 @@ function PptPreviewView({
           <span className="eyebrow">PPT 初稿预览</span>
           <h1>{session.plan?.title || '已生成 PPT 初稿'}</h1>
           <p>
-            预览由真实 PPTX 转换而来，与下载终稿保持一致。
+            {session.output?.engine === 'template-fill' && session.output?.previewSource === 'fallback'
+              ? 'PPTX 已由模板填充引擎生成；当前预览为兜底预览，下载 PPTX 以终稿为准。'
+              : '预览由真实 PPTX 转换而来，与下载终稿保持一致。'}
             {session.output?.engine === 'template-fill' ? '本次已使用模板填充引擎。' : '本次使用普通生成引擎。'}
           </p>
         </div>
