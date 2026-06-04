@@ -16,6 +16,12 @@ from .ooxml import NOTES_SLIDE_REL_TYPE, REL_NS, SLIDE_REL_TYPE, _qn, _xml_bytes
 from .package import _empty_relationships_root, _max_numeric_rid
 
 
+def _resolve_notes_target(target: str, base_dir: str = "ppt/notesSlides") -> str:
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return posixpath.normpath(posixpath.join(base_dir, target))
+
+
 def _find_notes_master_target(entries: dict[str, bytes]) -> str | None:
     notes_master_rel_type = (
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster"
@@ -30,7 +36,9 @@ def _find_notes_master_target(entries: dict[str, bytes]) -> str | None:
             continue
         for rel in root.findall(_qn(REL_NS, "Relationship")):
             if rel.attrib.get("Type") == notes_master_rel_type:
-                return rel.attrib.get("Target")
+                target = rel.attrib.get("Target")
+                if target and _resolve_notes_target(target) in entries:
+                    return target
 
     presentation_rels = entries.get("ppt/_rels/presentation.xml.rels")
     if not presentation_rels:
@@ -46,10 +54,12 @@ def _find_notes_master_target(entries: dict[str, bytes]) -> str | None:
         if not target:
             return None
         if target.startswith("/"):
-            target = target.lstrip("/")
+            target_part = target.lstrip("/")
         else:
-            target = posixpath.normpath(posixpath.join("ppt", target))
-        return posixpath.relpath(target, "ppt/notesSlides")
+            target_part = posixpath.normpath(posixpath.join("ppt", target))
+        if target_part not in entries:
+            return None
+        return posixpath.relpath(target_part, "ppt/notesSlides")
     return None
 
 
