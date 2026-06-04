@@ -5,6 +5,11 @@ import {
   normalizeSummary,
   parseJsonResponse,
 } from './deepseek.js'
+import {
+  buildPptPlanPrompt,
+  buildPptRevisionPrompt,
+  normalizePptPlan,
+} from './pptPlan.js'
 
 const OPENAI_API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/responses'
 const modelName = process.env.OPENAI_MODEL || 'gpt-5.5'
@@ -251,6 +256,30 @@ JSON 格式：
   })
 
   return normalizeOpenFeedback(parseJsonResponse(payload, 'GPT-5.5'), answerItems)
+}
+
+export async function generatePptPlan(context) {
+  const payload = await callOpenAi({
+    temperature: 0.38,
+    maxTokens: Math.max(4096, context.slideCount * 850),
+    instructions:
+      '你是中文 PPT 内容策划助手。你只负责生成页面计划 JSON，不生成图片，不输出 Markdown。必须只输出有效 JSON。',
+    input: buildPptPlanPrompt(context),
+  })
+
+  return normalizePptPlan(parseJsonResponse(payload, 'GPT-5.5'), context.slideCount, context.fallbackTitle)
+}
+
+export async function revisePptPlan(context) {
+  const payload = await callOpenAi({
+    temperature: 0.34,
+    maxTokens: Math.max(4096, context.slideCount * 850),
+    instructions:
+      '你是中文 PPT 修改助手。你只根据修改意见调整页面计划 JSON，不生成图片，不输出 Markdown。必须只输出有效 JSON。',
+    input: buildPptRevisionPrompt(context),
+  })
+
+  return normalizePptPlan(parseJsonResponse(payload, 'GPT-5.5'), context.slideCount, context.fallbackTitle)
 }
 
 async function callOpenAi({ instructions, input, temperature, maxTokens }) {

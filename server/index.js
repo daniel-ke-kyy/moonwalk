@@ -4,7 +4,7 @@ import cors from 'cors'
 import multer from 'multer'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,6 +24,19 @@ import {
   prepareDocumentForAi,
   validateFileBasics,
 } from './documentProcessor.js'
+import { createPptxFromPlan } from './pptDeckBuilder.js'
+import {
+  PPT_MAX_SLIDES,
+  PPT_MIN_SLIDES,
+  PPT_MODES,
+  PPT_TYPES,
+} from './pptPlan.js'
+import { getCommandVersion, renderDocumentToPreviews } from './pptRenderer.js'
+import {
+  analyzeTemplateFiles,
+  buildTemplateContext,
+  extractContentFileText,
+} from './pptTemplateProcessor.js'
 import {
   ALLOWED_EXTENSIONS,
   DIFFICULTIES,
@@ -41,6 +54,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const distDir = path.resolve(__dirname, '../dist')
 const uploadRoot = await mkdtemp(path.join(os.tmpdir(), 'material-quiz-uploads-'))
 const sessions = new Map()
+const pptSessions = new Map()
 const accessPassword = String(process.env.ACCESS_PASSWORD || '').trim()
 const accessAuthEnabled = Boolean(accessPassword)
 const accessCookieName = 'moonwalk_access'
@@ -50,11 +64,14 @@ const upload = multer({
   limits: { fileSize: MAX_FILE_SIZE },
 })
 
+let pptRenderingStatusCache = null
+
 app.use(cors({ origin: true, credentials: true }))
 app.use(express.json({ limit: '2mb' }))
 
-app.get('/api/health', (_req, res) => {
+app.get('/api/health', async (_req, res) => {
   const defaultProvider = getDefaultAiProviderInfo()
+  const pptRendering = await getPptRenderingStatus()
   res.json({
     ok: true,
     aiConfigured: defaultProvider.configured,
@@ -65,6 +82,8 @@ app.get('/api/health', (_req, res) => {
     accessAuthRequired: accessAuthEnabled,
     defaultAiProvider: DEFAULT_AI_PROVIDER,
     aiProviders: listAiProviders(),
+    pptRenderingAvailable: pptRendering.available,
+    pptRendering,
     limits: {
       allowedExtensions: ALLOWED_EXTENSIONS,
       maxFileSizeMB: Math.round(MAX_FILE_SIZE / 1024 / 1024),
@@ -74,6 +93,10 @@ app.get('/api/health', (_req, res) => {
       openQuestionMin: OPEN_QUESTION_MIN,
       openQuestionMax: OPEN_QUESTION_MAX,
       difficulties: DIFFICULTIES,
+      pptModes: PPT_MODES,
+      pptTypes: PPT_TYPES,
+      pptMinSlides: PPT_MIN_SLIDES,
+      pptMaxSlides: PPT_MAX_SLIDES,
     },
   })
 })
@@ -117,6 +140,7 @@ app.post('/api/auth/logout', (_req, res) => {
 })
 
 app.use('/api', requireAccess)
+app.use('/api/ppt-files', express.static(uploadRoot))
 
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
@@ -164,6 +188,113 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       await rm(req.file.path, { force: true }).catch(() => {})
     }
     res.status(400).json({ error: toUserError(error) })
+  }
+})
+
+app.post('/api/ppt/analyze', upload.fields([
+  { name: 'templates', maxCount: 10 },
+  { name: 'contentFile', maxCount: 1 },
+]), async (req, res) => {
+  try {
+    await assertPptRendererReady()
+    const aiProvider = getAiProvider(req.body?.aiProvider)
+    assertAiProviderReady(aiProvider)
+
+    const files = req.files || {}
+    const templateFiles = Array.isArray(files.templates) ? files.templates : []
+    const contentFile = Array.isArray(files.contentFile) ? files.contentFile[0] : null
+    const sessionId = nanoid()
+    const sessionDir = path.join(uploadRoot, `ppt-${sessionId}`)
+    await mkdir(sessionDir, { recursive: true })
+
+    const [templates, contentFileResult] = await Promise.all([
+      analyzeTemplateFiles(templateFiles, sessionDir),
+      extractContentFileText(contentFile),
+    ])
+
+    const session = {
+      id: sessionId,
+      aiProviderId: aiProvider.id,
+      sessionDir,
+      templates,
+      contentText: normalizeLongText(req.body?.contentText, 40000),
+      contentFileText: contentFileResult.text,
+      contentFileInfo: contentFileResult.fileInfo,
+      requirements: normalizeLongText(req.body?.requirements, 12000),
+      mode: null,
+      pptType: null,
+      slideCount: null,
+      mainTemplateId: templates[0]?.id || null,
+      plan: null,
+      output: null,
+      createdAt: Date.now(),
+    }
+    pptSessions.set(sessionId, session)
+
+    res.json(serializePptSession(session))
+  } catch (error) {
+    await cleanupUploadedFiles(req.files)
+    res.status(400).json({ error: toUserError(error) })
+  }
+})
+
+app.post('/api/ppt/generate', async (req, res) => {
+  try {
+    await assertPptRendererReady()
+    const settings = normalizePptGenerationSettings(req.body)
+    const session = getPptSession(settings.sessionId)
+    const aiProvider = getSessionAiProvider(session, settings.aiProvider)
+    assertAiProviderReady(aiProvider)
+
+    applyPptSettings(session, settings)
+    const plan = await aiProvider.module.generatePptPlan(buildPptAiContext(session))
+    await renderPptSessionOutput(session, plan)
+    res.json(serializePptSession(session))
+  } catch (error) {
+    res.status(400).json({ error: toUserError(error) })
+  }
+})
+
+app.post('/api/ppt/revise', async (req, res) => {
+  try {
+    await assertPptRendererReady()
+    const settings = normalizePptRevisionSettings(req.body)
+    const session = getPptSession(settings.sessionId)
+    const aiProvider = getSessionAiProvider(session, settings.aiProvider)
+    assertAiProviderReady(aiProvider)
+    if (!session.plan) {
+      throw new Error('还没有生成 PPT 初稿，请先生成预览。')
+    }
+
+    const plan = await aiProvider.module.revisePptPlan({
+      ...buildPptAiContext(session),
+      currentPlan: session.plan,
+      slideComments: settings.slideComments,
+    })
+    await renderPptSessionOutput(session, plan)
+    res.json(serializePptSession(session))
+  } catch (error) {
+    res.status(400).json({ error: toUserError(error) })
+  }
+})
+
+app.get('/api/ppt/:sessionId/download/pptx', (req, res) => {
+  try {
+    const session = getPptSession(req.params.sessionId)
+    if (!session.output?.pptxPath) throw new Error('还没有可下载的 PPTX 终稿。')
+    res.download(session.output.pptxPath, `${safeDownloadName(session.plan?.title || 'moonwalk')}.pptx`)
+  } catch (error) {
+    res.status(404).json({ error: toUserError(error) })
+  }
+})
+
+app.get('/api/ppt/:sessionId/download/pdf', (req, res) => {
+  try {
+    const session = getPptSession(req.params.sessionId)
+    if (!session.output?.pdfPath) throw new Error('当前环境暂不支持 PDF 导出。')
+    res.download(session.output.pdfPath, `${safeDownloadName(session.plan?.title || 'moonwalk')}.pdf`)
+  } catch (error) {
+    res.status(404).json({ error: toUserError(error) })
   }
 })
 
@@ -269,10 +400,39 @@ async function cleanupAndExit() {
   process.exit(0)
 }
 
+async function getPptRenderingStatus() {
+  if (pptRenderingStatusCache) return pptRenderingStatusCache
+  const [sofficeVersion, pdftoppmVersion] = await Promise.all([
+    getCommandVersion('soffice', ['--version']),
+    getCommandVersion('pdftoppm', ['-v']),
+  ])
+  pptRenderingStatusCache = {
+    available: Boolean(sofficeVersion && pdftoppmVersion),
+    sofficeVersion,
+    pdftoppmVersion,
+  }
+  return pptRenderingStatusCache
+}
+
+async function assertPptRendererReady() {
+  const status = await getPptRenderingStatus()
+  if (!status.available) {
+    throw new Error('当前部署环境暂不支持 PPT 预览转换，请使用 Docker 版 Moonwalk 服务。')
+  }
+}
+
 function getSession(sessionId) {
   const session = sessions.get(sessionId)
   if (!session) {
     throw new Error('当前材料会话不存在，请重新上传材料。')
+  }
+  return session
+}
+
+function getPptSession(sessionId) {
+  const session = pptSessions.get(sessionId)
+  if (!session) {
+    throw new Error('当前 PPT 生成会话不存在，请回到首页重新开始。')
   }
   return session
 }
@@ -389,6 +549,181 @@ function normalizeOpenFeedbackSettings(body) {
 
   if (!sessionId) throw new Error('缺少材料会话。')
   return { sessionId, aiProvider, answers, feedbackContext }
+}
+
+function normalizePptGenerationSettings(body) {
+  const sessionId = String(body.sessionId || '')
+  const aiProvider = normalizeAiProviderId(body.aiProvider)
+  const mainTemplateId = String(body.mainTemplateId || '')
+  const mode = String(body.mode || '')
+  const pptType = String(body.pptType || '')
+  const slideCount = Number(body.slideCount)
+  const contentText = normalizeLongText(body.contentText, 40000)
+  const requirements = normalizeLongText(body.requirements, 12000)
+
+  if (!sessionId) throw new Error('缺少 PPT 生成会话。')
+  if (!mainTemplateId) throw new Error('请先选择 1 个主模板。')
+  if (!PPT_MODES.includes(mode)) throw new Error('PPT 生成模式无效。')
+  if (!PPT_TYPES.includes(pptType)) throw new Error('PPT 类型无效。')
+  if (!Number.isInteger(slideCount) || slideCount < PPT_MIN_SLIDES || slideCount > PPT_MAX_SLIDES) {
+    throw new Error(`PPT 页数必须在 ${PPT_MIN_SLIDES} 到 ${PPT_MAX_SLIDES} 页之间。`)
+  }
+
+  return {
+    sessionId,
+    aiProvider,
+    mainTemplateId,
+    mode,
+    pptType,
+    slideCount,
+    contentText,
+    requirements,
+  }
+}
+
+function normalizePptRevisionSettings(body) {
+  const sessionId = String(body.sessionId || '')
+  const aiProvider = normalizeAiProviderId(body.aiProvider)
+  const slideComments = Array.isArray(body.slideComments)
+    ? body.slideComments.map((item, index) => ({
+        slideNumber: Number(item?.slideNumber) || index + 1,
+        comment: String(item?.comment || '').trim(),
+      })).filter((item) => item.comment)
+    : []
+
+  if (!sessionId) throw new Error('缺少 PPT 生成会话。')
+  if (!slideComments.length) throw new Error('请至少填写 1 条具体修改意见。')
+  return { sessionId, aiProvider, slideComments }
+}
+
+function applyPptSettings(session, settings) {
+  const mainTemplate = session.templates.find((template) => template.id === settings.mainTemplateId)
+  if (!mainTemplate) {
+    throw new Error('选择的主模板不存在，请重新选择。')
+  }
+  session.mainTemplateId = settings.mainTemplateId
+  session.mode = settings.mode
+  session.pptType = settings.pptType
+  session.slideCount = settings.slideCount
+  session.contentText = settings.contentText
+  session.requirements = settings.requirements
+  session.templates = session.templates.map((template) => ({
+    ...template,
+    role: template.id === settings.mainTemplateId ? 'main' : 'auxiliary',
+  }))
+}
+
+function buildPptAiContext(session) {
+  const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
+  const auxiliaryTemplates = session.templates.filter((template) => template.id !== mainTemplate?.id)
+  return {
+    fallbackTitle: mainTemplate?.originalName || 'Moonwalk PPT',
+    pptType: session.pptType,
+    mode: session.mode,
+    slideCount: session.slideCount,
+    mainTemplateName: mainTemplate?.originalName || '未命名模板',
+    auxiliaryTemplateNames: auxiliaryTemplates.map((template) => template.originalName),
+    contentText: session.contentText,
+    contentFileText: session.contentFileText,
+    requirements: session.requirements,
+    templates: buildTemplateContext(session.templates),
+  }
+}
+
+async function renderPptSessionOutput(session, plan) {
+  const versionId = nanoid(8)
+  const outputDir = path.join(session.sessionDir, 'outputs', versionId)
+  await mkdir(outputDir, { recursive: true })
+  const pptxPath = path.join(outputDir, 'moonwalk-generated.pptx')
+  const previewDir = path.join(outputDir, 'preview')
+  const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
+  const templateAssets = mainTemplate?.extension === '.pptx' ? mainTemplate.assets : []
+
+  await createPptxFromPlan({
+    plan,
+    outputPath: pptxPath,
+    templateAssets,
+    settings: {
+      mode: session.mode,
+      pptType: session.pptType,
+    },
+  })
+
+  let pdfPath = null
+  let previewPaths = []
+  try {
+    const rendered = await renderDocumentToPreviews(pptxPath, previewDir, { prefix: 'slide', dpi: 128 })
+    pdfPath = rendered.pdfPath
+    previewPaths = rendered.previewPaths
+  } catch (error) {
+    throw new Error(`PPTX 已生成，但预览转换失败：${toUserError(error)}`)
+  }
+
+  session.plan = plan
+  session.output = {
+    versionId,
+    pptxPath,
+    pdfPath,
+    previewPaths,
+    generatedAt: new Date().toISOString(),
+  }
+}
+
+function serializePptSession(session) {
+  return {
+    sessionId: session.id,
+    aiProvider: session.aiProviderId,
+    selectedMainTemplateId: session.mainTemplateId,
+    mode: session.mode,
+    pptType: session.pptType,
+    slideCount: session.slideCount,
+    contentFileInfo: session.contentFileInfo,
+    templates: session.templates.map((template) => ({
+      id: template.id,
+      originalName: template.originalName,
+      extension: template.extension,
+      size: template.size,
+      pageCount: template.pageCount,
+      slideCount: template.slideCount,
+      role: template.role,
+      textSample: template.textSample,
+      detectedColors: template.detectedColors,
+      imageCount: template.assets.length,
+      previewUrls: template.previewPaths.map((filePath) => toUploadFileUrl(filePath)),
+    })),
+    plan: session.plan,
+    output: session.output
+      ? {
+          generatedAt: session.output.generatedAt,
+          previewUrls: session.output.previewPaths.map((filePath) => toUploadFileUrl(filePath)),
+          pptxDownloadUrl: `/api/ppt/${session.id}/download/pptx`,
+          pdfDownloadUrl: session.output.pdfPath ? `/api/ppt/${session.id}/download/pdf` : null,
+        }
+      : null,
+  }
+}
+
+function toUploadFileUrl(filePath) {
+  const relative = path.relative(uploadRoot, filePath)
+  const segments = relative.split(path.sep).map((segment) => encodeURIComponent(segment))
+  return `/api/ppt-files/${segments.join('/')}`
+}
+
+async function cleanupUploadedFiles(files) {
+  const allFiles = Object.values(files || {}).flat().filter(Boolean)
+  await Promise.all(allFiles.map((file) => rm(file.path, { force: true }).catch(() => {})))
+}
+
+function normalizeLongText(value, maxLength) {
+  const text = String(value || '').trim()
+  return text.length > maxLength ? `${text.slice(0, maxLength)}\n...（内容已截断）` : text
+}
+
+function safeDownloadName(value) {
+  return String(value || 'moonwalk')
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, '-')
+    .slice(0, 80)
 }
 
 function validateSelectedSections(session, selectedSectionIndexes) {

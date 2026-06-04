@@ -1,0 +1,8 @@
+node_modules
+dist
+.git
+.env
+.npm-cache
+work
+*.log
+dist-ssr

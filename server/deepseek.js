@@ -1,4 +1,9 @@
 import { emptyMaterialSummary } from './types.js'
+import {
+  buildPptPlanPrompt,
+  buildPptRevisionPrompt,
+  normalizePptPlan,
+} from './pptPlan.js'
 
 const DEEPSEEK_API_URL = process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/chat/completions'
 const modelName = process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash'
@@ -277,6 +282,46 @@ JSON 格式：
   })
 
   return normalizeOpenFeedback(parseJsonResponse(payload), answerItems)
+}
+
+export async function generatePptPlan(context) {
+  const payload = await callDeepSeek({
+    temperature: 0.38,
+    maxTokens: Math.max(4096, context.slideCount * 850),
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是中文 PPT 内容策划助手。你只负责生成页面计划 JSON，不生成图片，不输出 Markdown。必须只输出有效 JSON。',
+      },
+      {
+        role: 'user',
+        content: buildPptPlanPrompt(context),
+      },
+    ],
+  })
+
+  return normalizePptPlan(parseJsonResponse(payload), context.slideCount, context.fallbackTitle)
+}
+
+export async function revisePptPlan(context) {
+  const payload = await callDeepSeek({
+    temperature: 0.34,
+    maxTokens: Math.max(4096, context.slideCount * 850),
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是中文 PPT 修改助手。你只根据修改意见调整页面计划 JSON，不生成图片，不输出 Markdown。必须只输出有效 JSON。',
+      },
+      {
+        role: 'user',
+        content: buildPptRevisionPrompt(context),
+      },
+    ],
+  })
+
+  return normalizePptPlan(parseJsonResponse(payload), context.slideCount, context.fallbackTitle)
 }
 
 async function callDeepSeek({ messages, temperature, maxTokens }) {

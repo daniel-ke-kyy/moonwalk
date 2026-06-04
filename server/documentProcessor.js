@@ -107,7 +107,7 @@ export function getPptxSlideCount(filePath) {
     .filter((entry) => /^ppt\/slides\/slide\d+\.xml$/.test(entry.entryName)).length
 }
 
-async function extractPdfText(filePath) {
+export async function extractPdfText(filePath) {
   const buffer = await readFile(filePath)
   const parserInstance = new PDFParse({ data: buffer })
   try {
@@ -118,12 +118,12 @@ async function extractPdfText(filePath) {
   }
 }
 
-async function extractDocxText(filePath) {
+export async function extractDocxText(filePath) {
   const result = await mammoth.convertToMarkdown({ path: filePath })
   return ensureTextContext(trimText(result.value || '', 40000), 'DOCX')
 }
 
-async function extractPptxText(filePath) {
+export async function extractPptxText(filePath) {
   const zip = new AdmZip(filePath)
   const slides = zip
     .getEntries()
@@ -138,6 +138,11 @@ async function extractPptxText(filePath) {
   })
 
   return ensureTextContext(trimText(slideTexts.join('\n'), 40000), 'PPTX')
+}
+
+export async function extractPlainText(filePath) {
+  const text = await readFile(filePath, 'utf8')
+  return ensureTextContext(trimText(text || '', 40000), 'TXT')
 }
 
 function getSlideNumber(entryName) {

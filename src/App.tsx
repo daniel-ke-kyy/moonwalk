@@ -19,9 +19,11 @@ type Importance = 'high' | 'medium' | 'low'
 type Difficulty = '简单' | '中等' | '困难'
 type QuestionType = 'single' | 'multiple'
 type OptionId = 'A' | 'B' | 'C' | 'D'
-type Step = 'upload' | 'summary' | 'quiz' | 'result'
+type Step = 'upload' | 'summary' | 'quiz' | 'result' | 'pptSetup' | 'pptPreview' | 'pptFinal'
 type AssessmentMode = 'knowledge' | 'open'
 type AiProviderId = 'deepseek' | 'openai'
+type PptMode = '风格复用' | '版式套用' | '原稿改写'
+type PptType = '课程汇报' | '论文答辩' | '商业方案' | '读书报告' | '课堂展示' | '培训课件'
 
 type AuthStatus = {
   required: boolean
@@ -44,6 +46,12 @@ type Health = {
   lowCostModelSelected: boolean
   defaultAiProvider?: AiProviderId
   aiProviders?: AiProviderStatus[]
+  pptRenderingAvailable?: boolean
+  pptRendering?: {
+    available: boolean
+    sofficeVersion: string | null
+    pdftoppmVersion: string | null
+  }
   limits: {
     allowedExtensions: string[]
     maxFileSizeMB: number
@@ -53,6 +61,10 @@ type Health = {
     openQuestionMin: number
     openQuestionMax: number
     difficulties: Difficulty[]
+    pptModes?: PptMode[]
+    pptTypes?: PptType[]
+    pptMinSlides?: number
+    pptMaxSlides?: number
   }
 }
 
@@ -161,12 +173,73 @@ type OpenFeedbackResponse = {
 
 type Answers = Record<string, OptionId[]>
 type OpenAnswers = Record<string, string>
+type PptTemplate = {
+  id: string
+  originalName: string
+  extension: string
+  size: number
+  pageCount: number | null
+  slideCount: number | null
+  role: 'main' | 'auxiliary'
+  textSample: string
+  detectedColors: string[]
+  imageCount: number
+  previewUrls: string[]
+}
+
+type PptSlidePlan = {
+  title: string
+  subtitle: string
+  layout: string
+  emphasis: string
+  bullets: string[]
+  footer: string
+  speakerNotes: string
+}
+
+type PptPlan = {
+  title: string
+  subtitle: string
+  theme: {
+    tone: string
+    primaryColor: string
+    accentColor: string
+    backgroundColor: string
+  }
+  slides: PptSlidePlan[]
+}
+
+type PptSessionResponse = {
+  sessionId: string
+  aiProvider: AiProviderId
+  selectedMainTemplateId: string
+  mode: PptMode | null
+  pptType: PptType | null
+  slideCount: number | null
+  contentFileInfo: {
+    originalName: string
+    extension: string
+    size: number
+  } | null
+  templates: PptTemplate[]
+  plan: PptPlan | null
+  output: {
+    generatedAt: string
+    previewUrls: string[]
+    pptxDownloadUrl: string
+    pdfDownloadUrl: string | null
+  } | null
+}
+
+type PptSlideComments = Record<number, string>
 
 const apiBase = import.meta.env.VITE_API_BASE || ''
 const fallbackQuestionCounts = [5, 10, 15, 20, 30]
 const fallbackOpenQuestionMin = 1
 const fallbackOpenQuestionMax = 10
 const fallbackDifficulties: Difficulty[] = ['简单', '中等', '困难']
+const fallbackPptModes: PptMode[] = ['风格复用', '版式套用', '原稿改写']
+const fallbackPptTypes: PptType[] = ['课程汇报', '论文答辩', '商业方案', '读书报告', '课堂展示', '培训课件']
 const defaultAiProvider: AiProviderId = 'deepseek'
 const fallbackAiProviders: AiProviderStatus[] = [
   {
@@ -217,6 +290,19 @@ function App() {
   const [isUploading, setIsUploading] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isReviewingOpen, setIsReviewingOpen] = useState(false)
+  const [pptSession, setPptSession] = useState<PptSessionResponse | null>(null)
+  const [pptTemplates, setPptTemplates] = useState<File[]>([])
+  const [pptContentFile, setPptContentFile] = useState<File | null>(null)
+  const [pptContentText, setPptContentText] = useState('')
+  const [pptRequirements, setPptRequirements] = useState('')
+  const [pptMode, setPptMode] = useState<PptMode>('风格复用')
+  const [pptType, setPptType] = useState<PptType>('课程汇报')
+  const [pptSlideCount, setPptSlideCount] = useState(10)
+  const [pptMainTemplateId, setPptMainTemplateId] = useState('')
+  const [pptSlideComments, setPptSlideComments] = useState<PptSlideComments>({})
+  const [isAnalyzingPpt, setIsAnalyzingPpt] = useState(false)
+  const [isGeneratingPpt, setIsGeneratingPpt] = useState(false)
+  const [isRevisingPpt, setIsRevisingPpt] = useState(false)
   const [error, setError] = useState('')
   const [missingIds, setMissingIds] = useState<string[]>([])
 
@@ -408,6 +494,7 @@ function App() {
     setAssessmentMode('knowledge')
     setLockedAiProvider(nextAiProvider)
     setWritingGoal('')
+    clearPptFlow()
     setError('')
     setMissingIds([])
   }
@@ -419,6 +506,154 @@ function App() {
   function resetForDeepSeekRetry() {
     setSelectedAiProvider('deepseek')
     resetFlow('deepseek')
+  }
+
+  function startPptFlow() {
+    setError('')
+    setLockedAiProvider(selectedAiProvider)
+    setStep('pptSetup')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  function switchPptToDeepSeek() {
+    setSelectedAiProvider('deepseek')
+    setLockedAiProvider('deepseek')
+    setPptSession(null)
+    setPptMainTemplateId('')
+    setPptSlideComments({})
+    setError('')
+    setStep('pptSetup')
+  }
+
+  function clearPptFlow() {
+    setPptSession(null)
+    setPptTemplates([])
+    setPptContentFile(null)
+    setPptContentText('')
+    setPptRequirements('')
+    setPptMode('风格复用')
+    setPptType('课程汇报')
+    setPptSlideCount(10)
+    setPptMainTemplateId('')
+    setPptSlideComments({})
+    setIsAnalyzingPpt(false)
+    setIsGeneratingPpt(false)
+    setIsRevisingPpt(false)
+  }
+
+  function backToUploadFromPpt() {
+    clearPptFlow()
+    setLockedAiProvider(selectedAiProvider)
+    setError('')
+    setStep('upload')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  async function handleAnalyzePptTemplates(event: FormEvent) {
+    event.preventDefault()
+    if (!pptTemplates.length) {
+      setError('请至少上传 1 个模板文件。')
+      return
+    }
+    if (pptTemplates.length > 10) {
+      setError('模板文件最多上传 10 个。')
+      return
+    }
+
+    setError('')
+    setIsAnalyzingPpt(true)
+    try {
+      const formData = new FormData()
+      pptTemplates.forEach((file) => formData.append('templates', file))
+      if (pptContentFile) formData.append('contentFile', pptContentFile)
+      formData.append('contentText', pptContentText)
+      formData.append('requirements', pptRequirements)
+      formData.append('aiProvider', lockedAiProvider)
+
+      const response = await fetch(`${apiBase}/api/ppt/analyze`, {
+        method: 'POST',
+        credentials: 'include',
+        body: formData,
+      })
+      const data = await parseApiResponse<PptSessionResponse>(response)
+      setPptSession(data)
+      setPptMainTemplateId(data.selectedMainTemplateId || data.templates[0]?.id || '')
+    } catch (pptError) {
+      setError(getErrorText(pptError))
+    } finally {
+      setIsAnalyzingPpt(false)
+    }
+  }
+
+  async function handleGeneratePpt(event?: FormEvent) {
+    event?.preventDefault()
+    if (!pptSession) {
+      setError('请先分析模板文件。')
+      return
+    }
+    if (!pptMainTemplateId) {
+      setError('请先选择 1 个主模板。')
+      return
+    }
+
+    setError('')
+    setIsGeneratingPpt(true)
+    try {
+      const data = await fetchJson<PptSessionResponse>('/api/ppt/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: pptSession.sessionId,
+          aiProvider: lockedAiProvider,
+          mainTemplateId: pptMainTemplateId,
+          mode: pptMode,
+          pptType,
+          slideCount: pptSlideCount,
+          contentText: pptContentText,
+          requirements: pptRequirements,
+        }),
+      })
+      setPptSession(data)
+      setPptSlideComments({})
+      setStep('pptPreview')
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    } catch (pptError) {
+      setError(getErrorText(pptError))
+    } finally {
+      setIsGeneratingPpt(false)
+    }
+  }
+
+  async function handleRevisePpt() {
+    if (!pptSession) return
+    const slideComments = Object.entries(pptSlideComments)
+      .map(([slideNumber, comment]) => ({ slideNumber: Number(slideNumber), comment: comment.trim() }))
+      .filter((item) => item.comment)
+    if (!slideComments.length) {
+      setError('请至少给 1 页填写具体修改意见。')
+      return
+    }
+
+    setError('')
+    setIsRevisingPpt(true)
+    try {
+      const data = await fetchJson<PptSessionResponse>('/api/ppt/revise', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: pptSession.sessionId,
+          aiProvider: lockedAiProvider,
+          slideComments,
+        }),
+      })
+      setPptSession(data)
+      setPptSlideComments({})
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    } catch (pptError) {
+      setError(getErrorText(pptError))
+    } finally {
+      setIsRevisingPpt(false)
+    }
   }
 
   function backToSummaryFromResult() {
@@ -491,6 +726,73 @@ function App() {
           error={error}
           onSwitchToDeepSeek={resetForDeepSeekRetry}
           onUpload={handleUpload}
+          onStartPpt={startPptFlow}
+        />
+      )}
+
+      {step === 'pptSetup' && (
+        <PptSetupView
+          health={health}
+          lockedAiProvider={lockedAiProvider}
+          templates={pptTemplates}
+          setTemplates={(files) => {
+            setPptTemplates(files)
+            setPptSession(null)
+            setPptMainTemplateId('')
+          }}
+          contentFile={pptContentFile}
+          setContentFile={(file) => {
+            setPptContentFile(file)
+            setPptSession(null)
+            setPptMainTemplateId('')
+          }}
+          contentText={pptContentText}
+          setContentText={setPptContentText}
+          requirements={pptRequirements}
+          setRequirements={setPptRequirements}
+          mode={pptMode}
+          setMode={setPptMode}
+          pptType={pptType}
+          setPptType={setPptType}
+          slideCount={pptSlideCount}
+          setSlideCount={setPptSlideCount}
+          session={pptSession}
+          mainTemplateId={pptMainTemplateId}
+          setMainTemplateId={setPptMainTemplateId}
+          isAnalyzing={isAnalyzingPpt}
+          isGenerating={isGeneratingPpt}
+          error={error}
+          onAnalyze={handleAnalyzePptTemplates}
+          onGenerate={handleGeneratePpt}
+          onBack={backToUploadFromPpt}
+          onSwitchToDeepSeek={switchPptToDeepSeek}
+        />
+      )}
+
+      {step === 'pptPreview' && pptSession && (
+        <PptPreviewView
+          session={pptSession}
+          slideComments={pptSlideComments}
+          setSlideComments={setPptSlideComments}
+          isRevising={isRevisingPpt}
+          error={error}
+          lockedAiProvider={lockedAiProvider}
+          onRevise={handleRevisePpt}
+          onFinal={() => {
+            setError('')
+            setStep('pptFinal')
+            window.scrollTo({ top: 0, behavior: 'smooth' })
+          }}
+          onBack={() => setStep('pptSetup')}
+          onSwitchToDeepSeek={switchPptToDeepSeek}
+        />
+      )}
+
+      {step === 'pptFinal' && pptSession && (
+        <PptFinalView
+          session={pptSession}
+          onBack={() => setStep('pptPreview')}
+          onRestart={backToUploadFromPpt}
         />
       )}
 
@@ -644,12 +946,20 @@ function TopBar({
   showLogout: boolean
   onLogout: () => void
 }) {
-  const items = [
-    ['upload', '上传材料'],
-    ['summary', '确认摘要'],
-    ['quiz', '开始答题'],
-    ['result', '查看解析'],
-  ] as Array<[Step, string]>
+  const isPptFlow = currentStep.startsWith('ppt')
+  const items = isPptFlow
+    ? [
+        ['upload', '首页'],
+        ['pptSetup', '设置模板'],
+        ['pptPreview', '预览修改'],
+        ['pptFinal', '导出终稿'],
+      ] as Array<[Step, string]>
+    : [
+        ['upload', '上传材料'],
+        ['summary', '确认摘要'],
+        ['quiz', '开始答题'],
+        ['result', '查看解析'],
+      ] as Array<[Step, string]>
 
   return (
     <header className="top-bar">
@@ -689,6 +999,7 @@ function UploadView({
   error,
   onSwitchToDeepSeek,
   onUpload,
+  onStartPpt,
 }: {
   health: Health | null
   selectedAiProvider: AiProviderId
@@ -697,6 +1008,7 @@ function UploadView({
   error: string
   onSwitchToDeepSeek: () => void
   onUpload: (file: File | null) => void
+  onStartPpt: () => void
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [dragActive, setDragActive] = useState(false)
@@ -765,6 +1077,27 @@ function UploadView({
         setSelectedAiProvider={setSelectedAiProvider}
         disabled={isUploading}
       />
+
+      <section className="ppt-entry-panel">
+        <div>
+          <span className="eyebrow">PPTX / PDF 模板</span>
+          <h2>基于模板的 PPT 生成</h2>
+          <p>
+            {health?.pptRenderingAvailable === false
+              ? '当前部署环境暂不支持 PPT 预览转换，请使用 Docker 版 Moonwalk 服务。'
+              : '上传优秀 PPT 或 PDF 作为风格参考，再输入内容和制作需求，生成可预览、可修改、可下载的 PPTX。'}
+          </p>
+        </div>
+        <button
+          className="primary-button"
+          disabled={isUploading || health?.pptRenderingAvailable === false}
+          onClick={onStartPpt}
+        >
+          进入 PPT 生成
+          <ChevronRight size={18} />
+        </button>
+      </section>
+
       <StatusStrip health={health} selectedAiProvider={selectedAiProvider} />
       {error && (
         <ErrorNotice
@@ -1566,6 +1899,424 @@ function OpenResultView({
   )
 }
 
+function PptSetupView({
+  health,
+  lockedAiProvider,
+  templates,
+  setTemplates,
+  contentFile,
+  setContentFile,
+  contentText,
+  setContentText,
+  requirements,
+  setRequirements,
+  mode,
+  setMode,
+  pptType,
+  setPptType,
+  slideCount,
+  setSlideCount,
+  session,
+  mainTemplateId,
+  setMainTemplateId,
+  isAnalyzing,
+  isGenerating,
+  error,
+  onAnalyze,
+  onGenerate,
+  onBack,
+  onSwitchToDeepSeek,
+}: {
+  health: Health | null
+  lockedAiProvider: AiProviderId
+  templates: File[]
+  setTemplates: (files: File[]) => void
+  contentFile: File | null
+  setContentFile: (file: File | null) => void
+  contentText: string
+  setContentText: (text: string) => void
+  requirements: string
+  setRequirements: (text: string) => void
+  mode: PptMode
+  setMode: (mode: PptMode) => void
+  pptType: PptType
+  setPptType: (type: PptType) => void
+  slideCount: number
+  setSlideCount: (count: number) => void
+  session: PptSessionResponse | null
+  mainTemplateId: string
+  setMainTemplateId: (id: string) => void
+  isAnalyzing: boolean
+  isGenerating: boolean
+  error: string
+  onAnalyze: (event: FormEvent) => void
+  onGenerate: (event?: FormEvent) => void
+  onBack: () => void
+  onSwitchToDeepSeek: () => void
+}) {
+  const templateInputRef = useRef<HTMLInputElement | null>(null)
+  const contentInputRef = useRef<HTMLInputElement | null>(null)
+  const modes = health?.limits.pptModes?.length ? health.limits.pptModes : fallbackPptModes
+  const types = health?.limits.pptTypes?.length ? health.limits.pptTypes : fallbackPptTypes
+  const minSlides = health?.limits.pptMinSlides || 1
+  const maxSlides = health?.limits.pptMaxSlides || 30
+
+  function onTemplateChange(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []).slice(0, 10)
+    setTemplates(files)
+    event.target.value = ''
+  }
+
+  function onContentFileChange(event: ChangeEvent<HTMLInputElement>) {
+    setContentFile(event.target.files?.[0] || null)
+    event.target.value = ''
+  }
+
+  return (
+    <section className="summary-layout ppt-setup-layout">
+      <div className="page-heading summary-heading">
+        <button className="ghost-button" onClick={onBack}>
+          <ArrowLeft size={17} />
+          返回首页
+        </button>
+        <div>
+          <span className="eyebrow">基于模板的 PPT 生成</span>
+          <h1>上传模板，设定内容与生成方向</h1>
+          <p>当前流程已锁定使用 {lockedAiProvider === 'openai' ? 'GPT-5.5' : 'DeepSeek'}。先分析模板，再选择主模板生成初稿。</p>
+        </div>
+      </div>
+
+      <div className="ppt-setup-grid">
+        <form className="panel ppt-form-panel" onSubmit={onAnalyze}>
+          <div className="section-title">
+            <h2>模板与内容</h2>
+            <span>{templates.length} / 10 个模板</span>
+          </div>
+
+          <input
+            ref={templateInputRef}
+            type="file"
+            accept=".pptx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            multiple
+            hidden
+            onChange={onTemplateChange}
+          />
+          <input
+            ref={contentInputRef}
+            type="file"
+            accept=".txt,.docx,.pdf,.pptx,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            hidden
+            onChange={onContentFileChange}
+          />
+
+          <button type="button" className="file-pick-button" onClick={() => templateInputRef.current?.click()}>
+            <UploadCloud size={20} />
+            <span>
+              <strong>上传模板文件</strong>
+              <small>PPTX / PDF，最多 10 个，每个不超过 50MB</small>
+            </span>
+          </button>
+          {templates.length > 0 && (
+            <div className="selected-file-list">
+              {templates.map((file, index) => (
+                <span key={`${file.name}-${index}`}>{file.name}</span>
+              ))}
+            </div>
+          )}
+
+          <button type="button" className="file-pick-button" onClick={() => contentInputRef.current?.click()}>
+            <FileText size={20} />
+            <span>
+              <strong>上传内容文件</strong>
+              <small>可选，TXT / DOCX / PDF / PPTX，最多 1 个</small>
+            </span>
+          </button>
+          {contentFile && (
+            <div className="selected-file-list single">
+              <span>{contentFile.name}</span>
+              <button type="button" onClick={() => setContentFile(null)}>移除</button>
+            </div>
+          )}
+
+          <label className="field-block">
+            <span>PPT 内容</span>
+            <textarea
+              value={contentText}
+              onChange={(event) => setContentText(event.target.value)}
+              placeholder="可以粘贴大纲、正文、演讲稿或要点。若为空，AI 会根据类型和需求自行组织。"
+            />
+          </label>
+
+          <label className="field-block">
+            <span>PPT 制作需求</span>
+            <textarea
+              value={requirements}
+              onChange={(event) => setRequirements(event.target.value)}
+              placeholder="可选：例如更像某个模板、偏学术/商业、希望版式简洁、突出对比关系等。"
+            />
+          </label>
+
+          <button className="secondary-button full" disabled={isAnalyzing || isGenerating || !templates.length}>
+            {isAnalyzing ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
+            {isAnalyzing ? '正在分析模板' : '分析模板'}
+          </button>
+        </form>
+
+        <aside className="panel ppt-settings-panel">
+          <div className="section-title">
+            <h2>生成规则</h2>
+            <span>{slideCount} 页</span>
+          </div>
+
+          <fieldset>
+            <legend>生成模式</legend>
+            <div className="mode-switch three">
+              {modes.map((item) => (
+                <button
+                  type="button"
+                  className={mode === item ? 'active' : ''}
+                  key={item}
+                  onClick={() => setMode(item)}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>PPT 类型</legend>
+            <div className="ppt-type-grid">
+              {types.map((item) => (
+                <button
+                  type="button"
+                  className={pptType === item ? 'active' : ''}
+                  key={item}
+                  onClick={() => setPptType(item)}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+
+          <label className="field-block">
+            <span>生成页数</span>
+            <input
+              type="number"
+              min={minSlides}
+              max={maxSlides}
+              value={slideCount}
+              onChange={(event) => {
+                const next = Number(event.target.value) || minSlides
+                setSlideCount(Math.min(maxSlides, Math.max(minSlides, next)))
+              }}
+            />
+          </label>
+
+          <div className="ppt-note">
+            第一版会优先复用模板的视觉风格、版式秩序、可提取图片和文字结构；PDF 模板作为视觉参考。
+          </div>
+
+          <button
+            className="primary-button full"
+            disabled={isAnalyzing || isGenerating || !session || !mainTemplateId}
+            onClick={() => onGenerate()}
+          >
+            {isGenerating ? <Loader2 className="spin" size={18} /> : <ChevronRight size={18} />}
+            {isGenerating ? '正在生成 PPT' : '生成 PPT 初稿'}
+          </button>
+
+          {error && (
+            <ErrorNotice
+              message={error}
+              actionLabel={lockedAiProvider === 'openai' ? '切换到 DeepSeek 重试' : undefined}
+              onAction={lockedAiProvider === 'openai' ? onSwitchToDeepSeek : undefined}
+            />
+          )}
+        </aside>
+      </div>
+
+      {session && (
+        <section className="panel ppt-template-panel">
+          <div className="section-title">
+            <h2>选择主模板</h2>
+            <span>必须选择 1 个</span>
+          </div>
+          <div className="template-grid">
+            {session.templates.map((template) => (
+              <button
+                type="button"
+                className={`template-card ${mainTemplateId === template.id ? 'selected' : ''}`}
+                key={template.id}
+                onClick={() => setMainTemplateId(template.id)}
+              >
+                <div className="template-preview">
+                  {template.previewUrls[0] ? (
+                    <img src={withApiBase(template.previewUrls[0])} alt={template.originalName} />
+                  ) : (
+                    <FileText size={34} />
+                  )}
+                </div>
+                <div>
+                  <strong>{template.originalName}</strong>
+                  <small>
+                    {template.extension.toUpperCase().replace('.', '')}
+                    {template.slideCount ? ` · ${template.slideCount} 页幻灯片` : ''}
+                    {template.pageCount ? ` · ${template.pageCount} 页` : ''}
+                  </small>
+                </div>
+                <span>{mainTemplateId === template.id ? '主模板' : '辅助参考'}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+    </section>
+  )
+}
+
+function PptPreviewView({
+  session,
+  slideComments,
+  setSlideComments,
+  isRevising,
+  error,
+  lockedAiProvider,
+  onRevise,
+  onFinal,
+  onBack,
+  onSwitchToDeepSeek,
+}: {
+  session: PptSessionResponse
+  slideComments: PptSlideComments
+  setSlideComments: (comments: PptSlideComments) => void
+  isRevising: boolean
+  error: string
+  lockedAiProvider: AiProviderId
+  onRevise: () => void
+  onFinal: () => void
+  onBack: () => void
+  onSwitchToDeepSeek: () => void
+}) {
+  const previews = session.output?.previewUrls || []
+  return (
+    <section className="result-layout ppt-preview-layout">
+      <div className="page-heading result-heading">
+        <div>
+          <span className="eyebrow">PPT 初稿预览</span>
+          <h1>{session.plan?.title || '已生成 PPT 初稿'}</h1>
+          <p>预览由真实 PPTX 转换而来，与下载终稿保持一致。可以逐页填写修改意见后重新生成。</p>
+        </div>
+        <div className="result-actions">
+          <button className="secondary-button" onClick={onBack}>
+            <ArrowLeft size={17} />
+            返回设置
+          </button>
+          <button className="secondary-button" disabled={isRevising} onClick={onRevise}>
+            {isRevising ? <Loader2 className="spin" size={17} /> : <RefreshCcw size={17} />}
+            {isRevising ? '正在重新生成' : '根据修改意见重新生成'}
+          </button>
+          <button className="primary-button" onClick={onFinal}>
+            生成终稿
+            <ChevronRight size={17} />
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <ErrorNotice
+          message={error}
+          actionLabel={lockedAiProvider === 'openai' ? '切换到 DeepSeek 重试' : undefined}
+          onAction={lockedAiProvider === 'openai' ? onSwitchToDeepSeek : undefined}
+        />
+      )}
+
+      <section className="ppt-slide-list">
+        {previews.map((url, index) => (
+          <article className="ppt-slide-card" key={url}>
+            <div className="ppt-slide-meta">
+              <strong>第 {index + 1} 页</strong>
+              <span>{session.plan?.slides[index]?.layout || 'content'}</span>
+            </div>
+            <img src={withApiBase(url)} alt={`第 ${index + 1} 页预览`} />
+            <label className="field-block">
+              <span>本页修改意见</span>
+              <textarea
+                value={slideComments[index + 1] || ''}
+                onChange={(event) => setSlideComments({ ...slideComments, [index + 1]: event.target.value })}
+                placeholder="例如：这一页标题更锋利、删掉第三个要点、把结论提前、改成对比结构。"
+              />
+            </label>
+          </article>
+        ))}
+      </section>
+    </section>
+  )
+}
+
+function PptFinalView({
+  session,
+  onBack,
+  onRestart,
+}: {
+  session: PptSessionResponse
+  onBack: () => void
+  onRestart: () => void
+}) {
+  const previews = session.output?.previewUrls || []
+  return (
+    <section className="result-layout ppt-final-layout">
+      <div className="page-heading result-heading">
+        <div>
+          <span className="eyebrow">PPT 终稿</span>
+          <h1>{session.plan?.title || 'Moonwalk PPT'}</h1>
+          <p>{session.plan?.subtitle || '已生成可下载的 PPTX 文件。'}</p>
+        </div>
+        <div className="result-actions">
+          <button className="secondary-button" onClick={onBack}>
+            <ArrowLeft size={17} />
+            返回预览
+          </button>
+          <a className="primary-button" href={withApiBase(session.output?.pptxDownloadUrl || '#')}>
+            下载 PPTX
+            <ChevronRight size={17} />
+          </a>
+          {session.output?.pdfDownloadUrl ? (
+            <a className="secondary-button" href={withApiBase(session.output.pdfDownloadUrl)}>
+              下载 PDF
+            </a>
+          ) : (
+            <button className="secondary-button" disabled>暂不支持 PDF 导出</button>
+          )}
+          <button className="ghost-button" onClick={onRestart}>返回首页</button>
+        </div>
+      </div>
+
+      {previews[0] && (
+        <section className="panel cover-preview-panel">
+          <div className="section-title">
+            <h2>封面预览</h2>
+            <span>{previews.length} 页</span>
+          </div>
+          <img src={withApiBase(previews[0])} alt="PPT 封面预览" />
+        </section>
+      )}
+
+      <section className="ppt-slide-list compact">
+        {previews.map((url, index) => (
+          <article className="ppt-slide-card" key={url}>
+            <div className="ppt-slide-meta">
+              <strong>第 {index + 1} 页</strong>
+            </div>
+            <img src={withApiBase(url)} alt={`第 ${index + 1} 页预览`} />
+          </article>
+        ))}
+      </section>
+    </section>
+  )
+}
+
 function SourceReference({ sourceRef }: { sourceRef: SourceRef }) {
   return (
     <div className="source-ref">
@@ -1687,6 +2438,11 @@ function withFeedbackQuestionSet(questionSet: OpenQuestionSet, writingGoal: stri
 function formatFileSize(size: number) {
   if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)}MB`
   return `${Math.max(1, Math.round(size / 1024))}KB`
+}
+
+function withApiBase(url: string) {
+  if (!url || url.startsWith('http') || url.startsWith('data:')) return url
+  return `${apiBase}${url}`
 }
 
 export default App
