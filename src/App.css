@@ -220,7 +220,15 @@ h2 {
   box-shadow: var(--soft-shadow);
 }
 
-.upload-panel {
+.feature-panels {
+  display: grid;
+  gap: 22px;
+  width: min(920px, 100%);
+  margin: 0 auto;
+}
+
+.upload-panel,
+.ppt-entry-panel {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -238,29 +246,20 @@ h2 {
 }
 
 .ppt-entry-panel {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  width: min(780px, 100%);
-  margin: 22px auto 0;
-  padding: 20px;
-  text-align: left;
+  justify-content: center;
+  border-style: solid;
   background: rgba(255, 255, 255, 0.78);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  box-shadow: var(--soft-shadow);
 }
 
 .ppt-entry-panel h2 {
-  margin-top: 8px;
+  margin-top: 0;
 }
 
 .ppt-entry-panel p {
   max-width: 560px;
-  margin-top: 8px;
   color: var(--muted);
   line-height: 1.55;
+  text-align: center;
 }
 
 .upload-icon {

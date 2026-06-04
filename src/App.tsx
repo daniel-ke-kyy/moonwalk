@@ -1026,49 +1026,73 @@ function UploadView({
           PDF / DOCX / PPTX
         </div>
         <h1 className="hero-title">Moonwalk</h1>
-        <p>
-          使用选定 AI 分析本地提取的材料文字，生成知识检测或批判性开放式追问。
-        </p>
       </div>
 
-      <div
-        className={`upload-panel ${dragActive ? 'dragging' : ''}`}
-        onDragOver={(event) => {
-          event.preventDefault()
-          setDragActive(true)
-        }}
-        onDragLeave={() => setDragActive(false)}
-        onDrop={(event) => {
-          event.preventDefault()
-          setDragActive(false)
-          onUpload(event.dataTransfer.files?.[0] || null)
-        }}
-      >
-        <input
-          ref={inputRef}
-          type="file"
-          accept=".pdf,.docx,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation"
-          onChange={onFileChange}
-          hidden
-        />
-        <div className="upload-icon">
-          {isUploading ? <Loader2 className="spin" size={34} /> : <UploadCloud size={36} />}
+      <div className="feature-panels">
+        <div
+          className={`upload-panel ${dragActive ? 'dragging' : ''}`}
+          onDragOver={(event) => {
+            event.preventDefault()
+            setDragActive(true)
+          }}
+          onDragLeave={() => setDragActive(false)}
+          onDrop={(event) => {
+            event.preventDefault()
+            setDragActive(false)
+            onUpload(event.dataTransfer.files?.[0] || null)
+          }}
+        >
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".pdf,.docx,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            onChange={onFileChange}
+            hidden
+          />
+          <div className="upload-icon">
+            {isUploading ? <Loader2 className="spin" size={34} /> : <UploadCloud size={36} />}
+          </div>
+          <h2>{isUploading ? '正在识别材料' : '上传学习材料'}</h2>
+          <p>
+            {isUploading
+              ? `正在提取材料文字并调用 ${getAiProviderLabel(health, selectedAiProvider)} 分析，请稍等。`
+              : '拖拽文件到这里，或点击按钮选择文件。'}
+          </p>
+          <button className="primary-button" disabled={isUploading} onClick={() => inputRef.current?.click()}>
+            {isUploading ? '分析中' : '选择文件'}
+            {!isUploading && <ChevronRight size={18} />}
+          </button>
+          <div className="limit-grid">
+            <span>单文件不超过 {health?.limits.maxFileSizeMB || 50}MB</span>
+            <span>PDF 不超过 {health?.limits.maxPdfPages || 100} 页</span>
+            <span>PPTX 不超过 {health?.limits.maxPptxSlides || 100} 页</span>
+          </div>
         </div>
-        <h2>{isUploading ? '正在识别材料' : '上传学习材料'}</h2>
-        <p>
-          {isUploading
-            ? `正在提取材料文字并调用 ${getAiProviderLabel(health, selectedAiProvider)} 分析，请稍等。`
-            : '拖拽文件到这里，或点击按钮选择文件。'}
-        </p>
-        <button className="primary-button" disabled={isUploading} onClick={() => inputRef.current?.click()}>
-          {isUploading ? '分析中' : '选择文件'}
-          {!isUploading && <ChevronRight size={18} />}
-        </button>
-        <div className="limit-grid">
-          <span>单文件不超过 {health?.limits.maxFileSizeMB || 50}MB</span>
-          <span>PDF 不超过 {health?.limits.maxPdfPages || 100} 页</span>
-          <span>PPTX 不超过 {health?.limits.maxPptxSlides || 100} 页</span>
-        </div>
+
+        <section className="ppt-entry-panel">
+          <div className="upload-icon">
+            <FileText size={36} />
+          </div>
+          <h2>基于模板的 PPT 生成</h2>
+          <p>
+            {health?.pptRenderingAvailable === false
+              ? '当前部署环境暂不支持 PPT 预览转换，请使用 Docker 版 Moonwalk 服务。'
+              : '上传 PPTX 或 PDF 模板，再输入内容和制作需求，生成可预览、可修改、可下载的 PPTX。'}
+          </p>
+          <button
+            className="primary-button"
+            disabled={isUploading || health?.pptRenderingAvailable === false}
+            onClick={onStartPpt}
+          >
+            进入 PPT 生成
+            <ChevronRight size={18} />
+          </button>
+          <div className="limit-grid">
+            <span>最多 10 个模板</span>
+            <span>单文件不超过 50MB</span>
+            <span>PPT / PDF 不超过 100 页</span>
+          </div>
+        </section>
       </div>
 
       <AiProviderSelector
@@ -1077,26 +1101,6 @@ function UploadView({
         setSelectedAiProvider={setSelectedAiProvider}
         disabled={isUploading}
       />
-
-      <section className="ppt-entry-panel">
-        <div>
-          <span className="eyebrow">PPTX / PDF 模板</span>
-          <h2>基于模板的 PPT 生成</h2>
-          <p>
-            {health?.pptRenderingAvailable === false
-              ? '当前部署环境暂不支持 PPT 预览转换，请使用 Docker 版 Moonwalk 服务。'
-              : '上传优秀 PPT 或 PDF 作为风格参考，再输入内容和制作需求，生成可预览、可修改、可下载的 PPTX。'}
-          </p>
-        </div>
-        <button
-          className="primary-button"
-          disabled={isUploading || health?.pptRenderingAvailable === false}
-          onClick={onStartPpt}
-        >
-          进入 PPT 生成
-          <ChevronRight size={18} />
-        </button>
-      </section>
 
       <StatusStrip health={health} selectedAiProvider={selectedAiProvider} />
       {error && (
