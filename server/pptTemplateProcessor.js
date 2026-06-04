@@ -155,12 +155,23 @@ async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
       throw new Error(`模板 PDF「${originalName}」共 ${pageCount} 页，超过 100 页限制。`)
     }
     const text = await extractPdfText(file.path).catch(() => '')
-    const rendered = await renderDocumentToPreviews(file.path, renderDir, { prefix: 'page', dpi: 96, extension })
+    const previewLimit = options.previewLimit || 6
+    const rendered = await renderDocumentToPreviews(file.path, renderDir, {
+      prefix: 'page',
+      dpi: 96,
+      extension,
+      firstPage: 1,
+      lastPage: Math.min(pageCount, previewLimit),
+      timeoutMs: 45000,
+    }).catch((error) => {
+      console.warn(`PDF 模板「${originalName}」预览生成失败：${error.message}`)
+      return { previewPaths: [] }
+    })
     return {
       ...base,
       pageCount,
       textSample: trimText(text, 1600),
-      previewPaths: rendered.previewPaths.slice(0, options.previewLimit || 6),
+      previewPaths: rendered.previewPaths.slice(0, previewLimit),
     }
   }
 

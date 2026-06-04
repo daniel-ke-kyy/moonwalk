@@ -63,25 +63,106 @@ async function ensurePdfExtension(filePath, outputDir) {
 export async function renderPdfToPngs(pdfPath, outputDir, options = {}) {
   await mkdir(outputDir, { recursive: true })
   const prefix = path.join(outputDir, options.prefix || 'slide')
-  try {
-    await execFileAsync('pdftoppm', [
-      '-png',
-      '-r',
-      String(options.dpi || 128),
-      pdfPath,
+  const dpi = Number(options.dpi) || 128
+  const timeout = Number(options.timeoutMs) || renderTimeoutMs
+  const attempts = [
+    {
+      label: 'pdftoppm',
+      command: 'pdftoppm',
       prefix,
-    ], { timeout: renderTimeoutMs })
-  } catch (error) {
-    const detail = [error.stderr, error.stdout].filter(Boolean).join('\n').trim()
-    throw new Error(detail || 'PDF 预览转换失败，请确认文件不是加密 PDF，且当前环境已安装 pdftoppm。')
+      args: buildPdftoppmArgs(pdfPath, prefix, dpi, options),
+    },
+  ]
+
+  if (options.fallback !== false) {
+    const fallbackDpi = Math.min(dpi, 72)
+    attempts.push(
+      {
+        label: 'pdftoppm-low-dpi',
+        command: 'pdftoppm',
+        prefix: `${prefix}-low`,
+        args: buildPdftoppmArgs(pdfPath, `${prefix}-low`, fallbackDpi, options),
+      },
+      {
+        label: 'pdftocairo',
+        command: 'pdftocairo',
+        prefix: `${prefix}-cairo`,
+        args: buildPdftocairoArgs(pdfPath, `${prefix}-cairo`, fallbackDpi, options),
+      },
+    )
   }
 
+  const failures = []
+  for (const attempt of attempts) {
+    try {
+      await execFileAsync(attempt.command, attempt.args, { timeout })
+      const previewPaths = await collectPreviewPaths(outputDir, attempt.prefix)
+      if (previewPaths.length) return previewPaths
+      failures.push(`${attempt.label}: 未生成预览图片`)
+    } catch (error) {
+      const partialPreviewPaths = await collectPreviewPaths(outputDir, attempt.prefix)
+      if (partialPreviewPaths.length) return partialPreviewPaths
+      failures.push(`${attempt.label}: ${formatCommandError(error)}`)
+    }
+  }
+
+  throw new Error(`PDF 预览转换失败：${failures.join('；')}`)
+}
+
+function buildPdftoppmArgs(pdfPath, prefix, dpi, options) {
+  return [
+    '-png',
+    '-r',
+    String(dpi),
+    ...buildPdfPageRangeArgs(options),
+    pdfPath,
+    prefix,
+  ]
+}
+
+function buildPdftocairoArgs(pdfPath, prefix, dpi, options) {
+  return [
+    '-png',
+    '-r',
+    String(dpi),
+    ...buildPdfPageRangeArgs(options),
+    pdfPath,
+    prefix,
+  ]
+}
+
+function buildPdfPageRangeArgs(options) {
+  const firstPage = toPositiveInteger(options.firstPage)
+  const lastPage = toPositiveInteger(options.lastPage)
+  return [
+    ...(firstPage ? ['-f', String(firstPage)] : []),
+    ...(lastPage ? ['-l', String(lastPage)] : []),
+  ]
+}
+
+async function collectPreviewPaths(outputDir, prefix) {
   const files = await readdir(outputDir)
   const basename = path.basename(prefix)
   return files
     .filter((file) => file.startsWith(`${basename}-`) && file.toLowerCase().endsWith('.png'))
     .sort((left, right) => getPreviewNumber(left) - getPreviewNumber(right))
     .map((file) => path.join(outputDir, file))
+}
+
+function toPositiveInteger(value) {
+  const number = Number(value)
+  return Number.isInteger(number) && number > 0 ? number : null
+}
+
+function formatCommandError(error) {
+  const output = [error.stderr, error.stdout].filter(Boolean).join('\n').trim()
+  if (output) return output.replace(/\s+/g, ' ').slice(0, 500)
+
+  const parts = []
+  if (error.code) parts.push(`退出码 ${error.code}`)
+  if (error.signal) parts.push(`被 ${error.signal} 终止`)
+  if (error.killed) parts.push('命令超时或被终止')
+  return parts.join('，') || '转换命令没有返回详细信息'
 }
 
 export async function getCommandVersion(command, args) {
