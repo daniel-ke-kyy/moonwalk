@@ -21,11 +21,18 @@ export async function createPptxFromPlan({ plan, outputPath, templateAssets = []
   const palette = buildPalette(plan.theme)
   plan.slides.forEach((slidePlan, index) => {
     const slide = pptx.addSlide()
+    const masterBackground = selectMasterBackground(settings?.master, slidePlan, index, plan.slides.length)
     slide.background = { color: palette.background }
-    addTemplateAccent(slide, pptx, palette, templateAssets, index)
-    addSlideNumber(slide, index + 1, plan.slides.length, palette)
+    if (masterBackground) {
+      addMasterBackground(slide, masterBackground)
+    } else {
+      addTemplateAccent(slide, pptx, palette, templateAssets, index)
+      addSlideNumber(slide, index + 1, plan.slides.length, palette)
+    }
 
-    if (slidePlan.layout === 'cover' || index === 0) {
+    if (masterBackground) {
+      drawMasterOverlay(slide, pptx, slidePlan, plan, palette, index)
+    } else if (slidePlan.layout === 'cover' || index === 0) {
       drawCover(slide, pptx, slidePlan, plan, palette, templateAssets)
     } else if (slidePlan.layout === 'agenda') {
       drawAgenda(slide, pptx, slidePlan, index, palette)
@@ -51,6 +58,140 @@ export async function createPptxFromPlan({ plan, outputPath, templateAssets = []
   })
 
   await pptx.writeFile({ fileName: outputPath, compression: true })
+}
+
+function selectMasterBackground(master, slidePlan, index, total) {
+  const previewPaths = Array.isArray(master?.previewPaths) ? master.previewPaths : []
+  if (!previewPaths.length) return null
+  const roles = Array.isArray(master?.slideRoles) ? master.slideRoles : []
+  const wantedRole = index === 0
+    ? 'cover'
+    : index === total - 1
+      ? 'summary'
+      : slidePlan.layout === 'agenda'
+        ? 'agenda'
+        : slidePlan.layout === 'section'
+          ? 'section'
+          : 'content'
+  const matching = roles.filter((role) => role.role === wantedRole)
+  const fallbackContent = roles.filter((role) => role.role === 'content')
+  const candidates = matching.length ? matching : fallbackContent.length ? fallbackContent : roles
+  const selected = candidates[index % Math.max(candidates.length, 1)]
+  const selectedIndex = Math.max(0, Math.min(previewPaths.length - 1, (selected?.slideNumber || 1) - 1))
+  return previewPaths[selectedIndex] || previewPaths[index % previewPaths.length]
+}
+
+function addMasterBackground(slide, imagePath) {
+  slide.addImage({
+    path: imagePath,
+    x: 0,
+    y: 0,
+    w: SLIDE_W,
+    h: SLIDE_H,
+  })
+}
+
+function drawMasterOverlay(slide, pptx, slidePlan, plan, palette, index) {
+  if (slidePlan.layout === 'cover' || index === 0) {
+    slide.addShape(pptx.ShapeType.rect, {
+      x: 0.75,
+      y: 1.05,
+      w: 8.7,
+      h: 2.05,
+      fill: { color: palette.background, transparency: 18 },
+      line: { color: palette.background, transparency: 100 },
+    })
+    slide.addText(slidePlan.title || plan.title, {
+      x: 0.92,
+      y: 1.26,
+      w: 8.35,
+      h: 0.9,
+      fontFace: FONT,
+      fontSize: 31,
+      bold: true,
+      color: palette.ink,
+      fit: 'shrink',
+      margin: 0,
+      breakLine: false,
+    })
+    slide.addText(slidePlan.subtitle || plan.subtitle || ensureBullets(slidePlan, 1)[0], {
+      x: 0.94,
+      y: 2.32,
+      w: 8.15,
+      h: 0.42,
+      fontFace: FONT,
+      fontSize: 15,
+      color: palette.muted,
+      fit: 'shrink',
+      margin: 0,
+      breakLine: false,
+    })
+    return
+  }
+
+  if (slidePlan.layout === 'section') {
+    slide.addShape(pptx.ShapeType.rect, {
+      x: 0.78,
+      y: 2.12,
+      w: 8.2,
+      h: 1.3,
+      fill: { color: palette.background, transparency: 16 },
+      line: { color: palette.background, transparency: 100 },
+    })
+    slide.addText(slidePlan.title, {
+      x: 0.95,
+      y: 2.38,
+      w: 7.85,
+      h: 0.6,
+      fontFace: FONT,
+      fontSize: 28,
+      bold: true,
+      color: palette.ink,
+      fit: 'shrink',
+      margin: 0,
+      breakLine: false,
+    })
+    return
+  }
+
+  slide.addShape(pptx.ShapeType.rect, {
+    x: 0.72,
+    y: 0.58,
+    w: 11.5,
+    h: 0.74,
+    fill: { color: palette.background, transparency: 14 },
+    line: { color: palette.background, transparency: 100 },
+  })
+  slide.addText(slidePlan.title, {
+    x: 0.9,
+    y: 0.78,
+    w: 10.8,
+    h: 0.35,
+    fontFace: FONT,
+    fontSize: 21,
+    bold: true,
+    color: palette.ink,
+    fit: 'shrink',
+    margin: 0,
+    breakLine: false,
+  })
+  slide.addShape(pptx.ShapeType.rect, {
+    x: 0.82,
+    y: 1.58,
+    w: 11.4,
+    h: 4.8,
+    fill: { color: palette.background, transparency: 12 },
+    line: { color: palette.background, transparency: 100 },
+  })
+  addBulletList(slide, ensureBullets(slidePlan, 4), {
+    x: 1.1,
+    y: 1.92,
+    w: 10.85,
+    h: 4.0,
+    fontSize: 18,
+    color: palette.ink,
+    bulletColor: palette.primary,
+  })
 }
 
 function buildPalette(theme = {}) {

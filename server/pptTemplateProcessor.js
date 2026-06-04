@@ -35,6 +35,24 @@ export async function analyzeTemplateFiles(files, sessionDir) {
   return templates
 }
 
+export async function analyzeMasterFile(file, sessionDir) {
+  if (!file) return null
+  const master = await analyzeTemplateFile(file, 0, sessionDir, {
+    idPrefix: 'master',
+    directoryName: 'master',
+    role: 'master',
+    allowedExtensions: new Set(['.pptx']),
+    invalidExtensionMessage: '幻灯片母版第一版仅支持 PPTX。',
+    fileLabel: '母版 PPTX',
+    previewLimit: MAX_PPTX_SLIDES,
+  })
+  return {
+    ...master,
+    role: 'master',
+    slideRoles: inferMasterSlideRoles(master.slideTexts || []),
+  }
+}
+
 export async function extractContentFileText(file) {
   if (!file) return { text: '', fileInfo: null }
   const originalName = normalizeUploadFilename(file.originalname)
@@ -84,19 +102,35 @@ export function buildTemplateContext(templates) {
   }))
 }
 
-async function analyzeTemplateFile(file, index, sessionDir) {
+export function buildMasterContext(master, description) {
+  if (!master && !description) return null
+  return {
+    uploaded: Boolean(master),
+    originalName: master?.originalName || '',
+    slideCount: master?.slideCount || null,
+    textSample: master?.textSample || '',
+    detectedColors: master?.detectedColors || [],
+    imageCount: master?.assets?.length || 0,
+    slideRoles: master?.slideRoles || [],
+    description: description || '',
+  }
+}
+
+async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
   const originalName = normalizeUploadFilename(file.originalname)
   const extension = getExtension(originalName)
-  if (!templateExtensions.has(extension)) {
-    throw new Error('模板文件第一版仅支持 PPTX 或 PDF。')
+  const allowedExtensions = options.allowedExtensions || templateExtensions
+  if (!allowedExtensions.has(extension)) {
+    throw new Error(options.invalidExtensionMessage || '模板文件第一版仅支持 PPTX 或 PDF。')
   }
   if (file.size > MAX_FILE_SIZE) {
-    throw new Error(`模板文件「${originalName}」超过 50MB。`)
+    throw new Error(`${options.fileLabel || '模板文件'}「${originalName}」超过 50MB。`)
   }
 
-  const id = `tpl_${index + 1}`
-  const renderDir = path.join(sessionDir, 'templates', id, 'preview')
-  const assetDir = path.join(sessionDir, 'templates', id, 'assets')
+  const id = `${options.idPrefix || 'tpl'}_${index + 1}`
+  const directoryName = options.directoryName || 'templates'
+  const renderDir = path.join(sessionDir, directoryName, id, 'preview')
+  const assetDir = path.join(sessionDir, directoryName, id, 'assets')
   await mkdir(assetDir, { recursive: true })
 
   const base = {
@@ -107,11 +141,12 @@ async function analyzeTemplateFile(file, index, sessionDir) {
     path: file.path,
     pageCount: null,
     slideCount: null,
-    role: index === 0 ? 'main' : 'auxiliary',
+    role: options.role || (index === 0 ? 'main' : 'auxiliary'),
     textSample: '',
     detectedColors: [],
     previewPaths: [],
     assets: [],
+    slideTexts: [],
   }
 
   if (extension === '.pdf') {
@@ -125,13 +160,13 @@ async function analyzeTemplateFile(file, index, sessionDir) {
       ...base,
       pageCount,
       textSample: trimText(text, 1600),
-      previewPaths: rendered.previewPaths.slice(0, 6),
+      previewPaths: rendered.previewPaths.slice(0, options.previewLimit || 6),
     }
   }
 
   const slideCount = getPptxSlideCount(file.path)
   if (slideCount > MAX_PPTX_SLIDES) {
-    throw new Error(`模板 PPTX「${originalName}」共 ${slideCount} 页，超过 100 页限制。`)
+    throw new Error(`${options.fileLabel || '模板 PPTX'}「${originalName}」共 ${slideCount} 页，超过 100 页限制。`)
   }
   const [text, style] = await Promise.all([
     extractPptxText(file.path).catch(() => ''),
@@ -143,8 +178,9 @@ async function analyzeTemplateFile(file, index, sessionDir) {
     slideCount,
     textSample: trimText(text, 1800),
     detectedColors: style.colors,
-    previewPaths: rendered.previewPaths.slice(0, 6),
+    previewPaths: rendered.previewPaths.slice(0, options.previewLimit || 6),
     assets: style.assets.slice(0, 8),
+    slideTexts: style.slideTexts,
   }
 }
 
@@ -152,6 +188,7 @@ async function inspectPptxStyle(filePath, assetDir) {
   const zip = new AdmZip(filePath)
   const colors = new Map()
   const assets = []
+  const slideTexts = []
 
   for (const entry of zip.getEntries()) {
     if (/^ppt\/slides\/slide\d+\.xml$/.test(entry.entryName)) {
@@ -159,6 +196,10 @@ async function inspectPptxStyle(filePath, assetDir) {
       const parsed = parser.parse(xml)
       collectColors(parsed).forEach((color) => {
         colors.set(color, (colors.get(color) || 0) + 1)
+      })
+      slideTexts.push({
+        slideNumber: getSlideNumber(entry.entryName),
+        text: collectText(parsed).join(' ').replace(/\s+/g, ' ').trim(),
       })
     }
 
@@ -181,7 +222,33 @@ async function inspectPptxStyle(filePath, assetDir) {
       .map(([color]) => color)
       .slice(0, 8),
     assets,
+    slideTexts: slideTexts
+      .sort((a, b) => a.slideNumber - b.slideNumber)
+      .map((item, index) => ({
+        slideNumber: item.slideNumber || index + 1,
+        text: trimText(item.text, 500),
+      })),
   }
+}
+
+function inferMasterSlideRoles(slideTexts) {
+  return slideTexts.map((slide, index) => {
+    const text = slide.text || ''
+    const role = index === 0
+      ? 'cover'
+      : /目录|agenda|contents?/i.test(text)
+        ? 'agenda'
+        : /章节|section|part/i.test(text)
+          ? 'section'
+          : /总结|结论|thanks?|谢谢|尾页|结束/i.test(text)
+            ? 'summary'
+            : 'content'
+    return {
+      slideNumber: slide.slideNumber || index + 1,
+      role,
+      text,
+    }
+  })
 }
 
 function collectColors(value, output = []) {
@@ -199,6 +266,35 @@ function collectColors(value, output = []) {
     }
   }
   return output
+}
+
+function collectText(value, output = []) {
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (text) output.push(text)
+    return output
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectText(item, output))
+    return output
+  }
+
+  if (value && typeof value === 'object') {
+    if (typeof value['#text'] === 'string') {
+      const text = value['#text'].trim()
+      if (text) output.push(text)
+    }
+    Object.entries(value).forEach(([key, item]) => {
+      if (key !== '#text') collectText(item, output)
+    })
+  }
+
+  return output
+}
+
+function getSlideNumber(entryName) {
+  return Number(entryName.match(/slide(\d+)\.xml$/)?.[1] || 0)
 }
 
 function trimText(text, maxLength) {

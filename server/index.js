@@ -33,7 +33,9 @@ import {
 } from './pptPlan.js'
 import { getCommandVersion, renderDocumentToPreviews } from './pptRenderer.js'
 import {
+  analyzeMasterFile,
   analyzeTemplateFiles,
+  buildMasterContext,
   buildTemplateContext,
   extractContentFileText,
 } from './pptTemplateProcessor.js'
@@ -194,6 +196,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 app.post('/api/ppt/analyze', upload.fields([
   { name: 'templates', maxCount: 10 },
   { name: 'contentFile', maxCount: 1 },
+  { name: 'master', maxCount: 1 },
 ]), async (req, res) => {
   try {
     await assertPptRendererReady()
@@ -203,13 +206,15 @@ app.post('/api/ppt/analyze', upload.fields([
     const files = req.files || {}
     const templateFiles = Array.isArray(files.templates) ? files.templates : []
     const contentFile = Array.isArray(files.contentFile) ? files.contentFile[0] : null
+    const masterFile = Array.isArray(files.master) ? files.master[0] : null
     const sessionId = nanoid()
     const sessionDir = path.join(uploadRoot, `ppt-${sessionId}`)
     await mkdir(sessionDir, { recursive: true })
 
-    const [templates, contentFileResult] = await Promise.all([
+    const [templates, contentFileResult, master] = await Promise.all([
       analyzeTemplateFiles(templateFiles, sessionDir),
       extractContentFileText(contentFile),
+      analyzeMasterFile(masterFile, sessionDir),
     ])
 
     const session = {
@@ -221,6 +226,8 @@ app.post('/api/ppt/analyze', upload.fields([
       contentFileText: contentFileResult.text,
       contentFileInfo: contentFileResult.fileInfo,
       requirements: normalizeLongText(req.body?.requirements, 12000),
+      master,
+      masterDescription: normalizeLongText(req.body?.masterDescription, 12000),
       mode: null,
       pptType: null,
       slideCount: null,
@@ -560,6 +567,7 @@ function normalizePptGenerationSettings(body) {
   const slideCount = Number(body.slideCount)
   const contentText = normalizeLongText(body.contentText, 40000)
   const requirements = normalizeLongText(body.requirements, 12000)
+  const masterDescription = normalizeLongText(body.masterDescription, 12000)
 
   if (!sessionId) throw new Error('缺少 PPT 生成会话。')
   if (!mainTemplateId) throw new Error('请先选择 1 个主模板。')
@@ -578,6 +586,7 @@ function normalizePptGenerationSettings(body) {
     slideCount,
     contentText,
     requirements,
+    masterDescription,
   }
 }
 
@@ -607,6 +616,7 @@ function applyPptSettings(session, settings) {
   session.slideCount = settings.slideCount
   session.contentText = settings.contentText
   session.requirements = settings.requirements
+  session.masterDescription = settings.masterDescription
   session.templates = session.templates.map((template) => ({
     ...template,
     role: template.id === settings.mainTemplateId ? 'main' : 'auxiliary',
@@ -626,6 +636,7 @@ function buildPptAiContext(session) {
     contentText: session.contentText,
     contentFileText: session.contentFileText,
     requirements: session.requirements,
+    master: buildMasterContext(session.master, session.masterDescription),
     templates: buildTemplateContext(session.templates),
   }
 }
@@ -646,6 +657,12 @@ async function renderPptSessionOutput(session, plan) {
     settings: {
       mode: session.mode,
       pptType: session.pptType,
+      master: session.master
+        ? {
+            previewPaths: session.master.previewPaths,
+            slideRoles: session.master.slideRoles,
+          }
+        : null,
     },
   })
 
@@ -678,6 +695,19 @@ function serializePptSession(session) {
     pptType: session.pptType,
     slideCount: session.slideCount,
     contentFileInfo: session.contentFileInfo,
+    masterDescription: session.masterDescription,
+    master: session.master
+      ? {
+          originalName: session.master.originalName,
+          extension: session.master.extension,
+          size: session.master.size,
+          slideCount: session.master.slideCount,
+          detectedColors: session.master.detectedColors,
+          imageCount: session.master.assets.length,
+          slideRoles: session.master.slideRoles,
+          previewUrls: session.master.previewPaths.map((filePath) => toUploadFileUrl(filePath)),
+        }
+      : null,
     templates: session.templates.map((template) => ({
       id: template.id,
       originalName: template.originalName,

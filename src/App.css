@@ -1317,6 +1317,36 @@ legend {
   line-height: 1.55;
 }
 
+.master-block {
+  padding: 15px;
+  background: #fffbf6;
+  border: 1px solid #f1dfcc;
+  border-radius: 8px;
+}
+
+.compact-title {
+  margin-bottom: 2px;
+}
+
+.compact-title h2 {
+  font-size: 18px;
+}
+
+.master-summary {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  color: #765235;
+  background: #fff6eb;
+  border: 1px solid #efd7bd;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.master-summary span {
+  color: var(--muted);
+}
+
 .ppt-template-panel {
   margin-top: 18px;
 }

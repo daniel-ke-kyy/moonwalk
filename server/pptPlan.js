@@ -12,6 +12,7 @@ export function buildPptPlanPrompt(context) {
 - 页数：${context.slideCount}
 - 主模板：${context.mainTemplateName}
 - 辅助模板：${context.auxiliaryTemplateNames.join('、') || '无'}
+- 幻灯片母版：${context.master?.uploaded ? context.master.originalName : context.master?.description ? '仅文字描述' : '未提供'}
 
 生成模式说明：
 - 风格复用：学习模板的色系、气质和图文比例，内容结构由你重新组织。
@@ -27,8 +28,18 @@ ${context.contentFileText || '无'}
 用户 PPT 制作需求：
 ${context.requirements || '用户未填写，请你自行选择清晰、克制、适合中文展示的表达方式。'}
 
+幻灯片母版要求（最高优先级）：
+${context.master ? JSON.stringify(context.master, null, 2) : '用户未提供母版文件或母版描述，沿用模板参考与现有生成逻辑。'}
+
 模板可提取信息：
 ${JSON.stringify(context.templates, null, 2)}
+
+优先级规则：
+1. 用户对母版的补充说明优先级最高。
+2. 如果上传了母版 PPTX，必须优先遵守母版的颜色、字体、页眉页脚、背景、标题位置、内容区位置、形状、装饰线、图片、logo、页码位置。
+3. 如果上传母版且用户没有额外说明，页面计划要尽量 1:1 复刻母版的视觉结构；模板文件只作为辅助参考。
+4. 如果没有上传母版，但有母版文字描述，则优先遵守文字描述。
+5. 如果母版和主模板冲突，母版优先。
 
 输出要求：
 1. 统一使用中文。
@@ -39,6 +50,7 @@ ${JSON.stringify(context.templates, null, 2)}
 6. layout 只能从 cover、agenda、section、content、two_column、comparison、timeline、quote、summary 中选择。
 7. emphasis 只能从 calm、sharp、warm、formal 中选择。
 8. 如果内容不足，请用合理结构补全，但不要假装来自用户材料。
+9. 如果上传了母版，layout 要尽量匹配自动识别的母版页类型：封面用 cover，目录用 agenda，章节页用 section，正文页用 content/two_column/comparison/timeline，结尾用 summary。
 
 JSON 格式：
 {
@@ -71,6 +83,7 @@ export function buildPptRevisionPrompt(context) {
 生成模式：${context.mode}
 PPT 类型：${context.pptType}
 主模板：${context.mainTemplateName}
+幻灯片母版：${context.master?.uploaded ? context.master.originalName : context.master?.description ? '仅文字描述' : '未提供'}
 
 原页面计划：
 ${JSON.stringify(context.currentPlan, null, 2)}
@@ -84,13 +97,17 @@ ${context.contentText || '无'}
 制作需求：
 ${context.requirements || '无'}
 
+幻灯片母版要求（最高优先级）：
+${context.master ? JSON.stringify(context.master, null, 2) : '无'}
+
 要求：
 1. 对有修改意见的页面优先修改，没意见的页面可以保持原结构。
 2. 必须刚好返回 ${context.slideCount} 页。
 3. 不生成新图片。
 4. layout 只能从 cover、agenda、section、content、two_column、comparison、timeline、quote、summary 中选择。
 5. emphasis 只能从 calm、sharp、warm、formal 中选择。
-6. 只返回 JSON，格式与原页面计划一致。`
+6. 如果上传了母版，继续优先保留母版视觉结构，只调整用户要求修改的内容。
+7. 只返回 JSON，格式与原页面计划一致。`
 }
 
 export function normalizePptPlan(value, expectedCount, fallbackTitle = 'Moonwalk PPT') {

@@ -216,6 +216,17 @@ type PptSessionResponse = {
   mode: PptMode | null
   pptType: PptType | null
   slideCount: number | null
+  masterDescription: string
+  master: {
+    originalName: string
+    extension: string
+    size: number
+    slideCount: number | null
+    detectedColors: string[]
+    imageCount: number
+    slideRoles: Array<{ slideNumber: number; role: string; text: string }>
+    previewUrls: string[]
+  } | null
   contentFileInfo: {
     originalName: string
     extension: string
@@ -292,6 +303,8 @@ function App() {
   const [isReviewingOpen, setIsReviewingOpen] = useState(false)
   const [pptSession, setPptSession] = useState<PptSessionResponse | null>(null)
   const [pptTemplates, setPptTemplates] = useState<File[]>([])
+  const [pptMasterFile, setPptMasterFile] = useState<File | null>(null)
+  const [pptMasterDescription, setPptMasterDescription] = useState('')
   const [pptContentFile, setPptContentFile] = useState<File | null>(null)
   const [pptContentText, setPptContentText] = useState('')
   const [pptRequirements, setPptRequirements] = useState('')
@@ -528,6 +541,8 @@ function App() {
   function clearPptFlow() {
     setPptSession(null)
     setPptTemplates([])
+    setPptMasterFile(null)
+    setPptMasterDescription('')
     setPptContentFile(null)
     setPptContentText('')
     setPptRequirements('')
@@ -565,7 +580,9 @@ function App() {
     try {
       const formData = new FormData()
       pptTemplates.forEach((file) => formData.append('templates', file))
+      if (pptMasterFile) formData.append('master', pptMasterFile)
       if (pptContentFile) formData.append('contentFile', pptContentFile)
+      formData.append('masterDescription', pptMasterDescription)
       formData.append('contentText', pptContentText)
       formData.append('requirements', pptRequirements)
       formData.append('aiProvider', lockedAiProvider)
@@ -609,6 +626,7 @@ function App() {
           mode: pptMode,
           pptType,
           slideCount: pptSlideCount,
+          masterDescription: pptMasterDescription,
           contentText: pptContentText,
           requirements: pptRequirements,
         }),
@@ -737,6 +755,18 @@ function App() {
           templates={pptTemplates}
           setTemplates={(files) => {
             setPptTemplates(files)
+            setPptSession(null)
+            setPptMainTemplateId('')
+          }}
+          masterFile={pptMasterFile}
+          setMasterFile={(file) => {
+            setPptMasterFile(file)
+            setPptSession(null)
+            setPptMainTemplateId('')
+          }}
+          masterDescription={pptMasterDescription}
+          setMasterDescription={(value) => {
+            setPptMasterDescription(value)
             setPptSession(null)
             setPptMainTemplateId('')
           }}
@@ -1903,6 +1933,10 @@ function PptSetupView({
   lockedAiProvider,
   templates,
   setTemplates,
+  masterFile,
+  setMasterFile,
+  masterDescription,
+  setMasterDescription,
   contentFile,
   setContentFile,
   contentText,
@@ -1930,6 +1964,10 @@ function PptSetupView({
   lockedAiProvider: AiProviderId
   templates: File[]
   setTemplates: (files: File[]) => void
+  masterFile: File | null
+  setMasterFile: (file: File | null) => void
+  masterDescription: string
+  setMasterDescription: (value: string) => void
   contentFile: File | null
   setContentFile: (file: File | null) => void
   contentText: string
@@ -1954,6 +1992,7 @@ function PptSetupView({
   onSwitchToDeepSeek: () => void
 }) {
   const templateInputRef = useRef<HTMLInputElement | null>(null)
+  const masterInputRef = useRef<HTMLInputElement | null>(null)
   const contentInputRef = useRef<HTMLInputElement | null>(null)
   const modes = health?.limits.pptModes?.length ? health.limits.pptModes : fallbackPptModes
   const types = health?.limits.pptTypes?.length ? health.limits.pptTypes : fallbackPptTypes
@@ -1968,6 +2007,11 @@ function PptSetupView({
 
   function onContentFileChange(event: ChangeEvent<HTMLInputElement>) {
     setContentFile(event.target.files?.[0] || null)
+    event.target.value = ''
+  }
+
+  function onMasterFileChange(event: ChangeEvent<HTMLInputElement>) {
+    setMasterFile(event.target.files?.[0] || null)
     event.target.value = ''
   }
 
@@ -2007,6 +2051,13 @@ function PptSetupView({
             hidden
             onChange={onContentFileChange}
           />
+          <input
+            ref={masterInputRef}
+            type="file"
+            accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            hidden
+            onChange={onMasterFileChange}
+          />
 
           <button type="button" className="file-pick-button" onClick={() => templateInputRef.current?.click()}>
             <UploadCloud size={20} />
@@ -2022,6 +2073,37 @@ function PptSetupView({
               ))}
             </div>
           )}
+
+          <section className="field-block master-block">
+            <div className="section-title compact-title">
+              <h2>幻灯片母版</h2>
+              <span>可选</span>
+            </div>
+            <button type="button" className="file-pick-button compact" onClick={() => masterInputRef.current?.click()}>
+              <UploadCloud size={20} />
+              <span>
+                <strong>上传母版 PPTX</strong>
+                <small>最多 1 个，母版优先于模板文件；不上传也可以只写说明</small>
+              </span>
+            </button>
+            {masterFile && (
+              <div className="selected-file-list single">
+                <span>{masterFile.name}</span>
+                <button type="button" onClick={() => setMasterFile(null)}>移除</button>
+              </div>
+            )}
+            <textarea
+              value={masterDescription}
+              onChange={(event) => setMasterDescription(event.target.value)}
+              placeholder="可选：例如保留母版页眉页脚和 logo，正文页更简洁；若不填写，将尽量 1:1 复刻母版视觉结构。"
+            />
+            {session?.master && (
+              <div className="master-summary">
+                <strong>{session.master.originalName}</strong>
+                <span>{session.master.slideCount || 0} 页母版 · 已自动识别页型</span>
+              </div>
+            )}
+          </section>
 
           <label className="field-block">
             <span>PPT 内容</span>
