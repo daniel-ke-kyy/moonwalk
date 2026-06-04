@@ -1245,6 +1245,11 @@ legend {
   color: var(--muted);
 }
 
+.file-pick-button.compact {
+  min-height: 62px;
+  padding: 12px;
+}
+
 .selected-file-list {
   display: flex;
   flex-wrap: wrap;

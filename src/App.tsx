@@ -1988,7 +1988,7 @@ function PptSetupView({
       <div className="ppt-setup-grid">
         <form className="panel ppt-form-panel" onSubmit={onAnalyze}>
           <div className="section-title">
-            <h2>模板与内容</h2>
+            <h2>模板上传</h2>
             <span>{templates.length} / 10 个模板</span>
           </div>
 
@@ -2023,22 +2023,21 @@ function PptSetupView({
             </div>
           )}
 
-          <button type="button" className="file-pick-button" onClick={() => contentInputRef.current?.click()}>
-            <FileText size={20} />
-            <span>
-              <strong>上传内容文件</strong>
-              <small>可选，TXT / DOCX / PDF / PPTX，最多 1 个</small>
-            </span>
-          </button>
-          {contentFile && (
-            <div className="selected-file-list single">
-              <span>{contentFile.name}</span>
-              <button type="button" onClick={() => setContentFile(null)}>移除</button>
-            </div>
-          )}
-
           <label className="field-block">
             <span>PPT 内容</span>
+            <button type="button" className="file-pick-button compact" onClick={() => contentInputRef.current?.click()}>
+              <FileText size={20} />
+              <span>
+                <strong>上传内容文件</strong>
+                <small>可选，TXT / DOCX / PDF / PPTX，最多 1 个</small>
+              </span>
+            </button>
+            {contentFile && (
+              <div className="selected-file-list single">
+                <span>{contentFile.name}</span>
+                <button type="button" onClick={() => setContentFile(null)}>移除</button>
+              </div>
+            )}
             <textarea
               value={contentText}
               onChange={(event) => setContentText(event.target.value)}
