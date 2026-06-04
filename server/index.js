@@ -775,7 +775,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   if (checkSummary.error > 0) {
     throw new Error(`模板填充计划存在 ${checkSummary.error} 个错误，无法应用。`)
   }
-  if (checkSummary.warn > Math.max(3, Math.floor(session.slideCount / 2))) {
+  if (checkSummary.warn > Math.max(10, session.slideCount * 4)) {
     throw new Error(`模板填充计划有 ${checkSummary.warn} 个容量警告，已回退到普通生成。`)
   }
 
