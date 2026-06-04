@@ -11,7 +11,7 @@ import {
   normalizePptPlan,
 } from './pptPlan.js'
 
-const OPENAI_API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/responses'
+const OPENAI_API_URL = normalizeOpenAiApiUrl()
 const modelName = process.env.OPENAI_MODEL || 'gpt-5.5'
 const reasoningEffort = process.env.OPENAI_REASONING_EFFORT || 'low'
 
@@ -337,4 +337,11 @@ function extractResponseText(json) {
   }
 
   return chunks.join('\n').trim()
+}
+
+function normalizeOpenAiApiUrl() {
+  if (process.env.OPENAI_API_URL) return process.env.OPENAI_API_URL
+  const baseUrl = process.env.OPENAI_BASE_URL
+  if (!baseUrl) return 'https://api.openai.com/v1/responses'
+  return `${baseUrl.replace(/\/+$/, '')}/responses`
 }
