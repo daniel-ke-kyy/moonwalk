@@ -36,6 +36,7 @@ import {
   analyzeTemplateFillLibrary,
   applyTemplateFillPlan,
   checkTemplateFillPlan,
+  normalizePptxForRendering,
   pruneSlideLibraryForAi,
   summarizeTemplateFillCheck,
   templateFillPlanToPptPlan,
@@ -779,7 +780,8 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
     throw new Error(`模板填充计划有 ${checkSummary.warn} 个容量警告，已回退到普通生成。`)
   }
 
-  const generatedPptxPath = await applyTemplateFillPlan(mainTemplate.path, planPath, pptxPath)
+  const rawGeneratedPptxPath = await applyTemplateFillPlan(mainTemplate.path, planPath, pptxPath)
+  const generatedPptxPath = await normalizePptxForRendering(rawGeneratedPptxPath)
   const plan = templateFillPlanToPptPlan(fillPlan, mainTemplate.originalName || 'Moonwalk PPT')
   let pdfPath = null
   let previewPaths = []

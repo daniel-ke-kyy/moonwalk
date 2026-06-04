@@ -35,6 +35,27 @@ export async function applyTemplateFillPlan(pptxPath, planPath, outputPath) {
   return findAppliedPptxPath(outputPath, result.stderr)
 }
 
+export async function normalizePptxForRendering(pptxPath) {
+  const normalizedPath = pptxPath.replace(/\.pptx$/i, '.normalized.pptx')
+  const script = [
+    'from pptx import Presentation',
+    'import sys',
+    'presentation = Presentation(sys.argv[1])',
+    'presentation.save(sys.argv[2])',
+  ].join('\n')
+  try {
+    await execFileAsync(pythonBin, ['-c', script, pptxPath, normalizedPath], {
+      timeout: commandTimeoutMs,
+      maxBuffer: commandMaxBuffer,
+    })
+    return normalizedPath
+  } catch (error) {
+    const detail = [error.stderr, error.stdout, error.message].filter(Boolean).join('\n').trim()
+    console.warn(`PPTX 规范化失败，继续使用原始模板填充文件：${detail || '没有返回详细信息'}`)
+    return pptxPath
+  }
+}
+
 export async function writeTemplateFillPlan(planPath, plan) {
   await mkdir(path.dirname(planPath), { recursive: true })
   await writeFile(planPath, `${JSON.stringify(plan, null, 2)}\n`, 'utf8')
