@@ -23,6 +23,11 @@ type Step = 'upload' | 'summary' | 'quiz' | 'result'
 type AssessmentMode = 'knowledge' | 'open'
 type AiProviderId = 'deepseek' | 'openai'
 
+type AuthStatus = {
+  required: boolean
+  authenticated: boolean
+}
+
 type AiProviderStatus = {
   id: AiProviderId
   label: string
@@ -186,6 +191,9 @@ const importanceLabels: Record<Importance, string> = {
 }
 
 function App() {
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
+  const [authError, setAuthError] = useState('')
+  const [isAuthenticating, setIsAuthenticating] = useState(false)
   const [health, setHealth] = useState<Health | null>(null)
   const [selectedAiProvider, setSelectedAiProvider] = useState<AiProviderId>(defaultAiProvider)
   const [lockedAiProvider, setLockedAiProvider] = useState<AiProviderId>(defaultAiProvider)
@@ -213,6 +221,14 @@ function App() {
   const [missingIds, setMissingIds] = useState<string[]>([])
 
   useEffect(() => {
+    fetchJson<AuthStatus>('/api/auth/status')
+      .then((data) => {
+        setAuthStatus(data)
+      })
+      .catch(() => {
+        setAuthStatus({ required: false, authenticated: true })
+      })
+
     fetchJson<Health>('/api/health')
       .then((data) => {
         setHealth(data)
@@ -248,6 +264,7 @@ function App() {
       formData.append('aiProvider', selectedAiProvider)
       const response = await fetch(`${apiBase}/api/upload`, {
         method: 'POST',
+        credentials: 'include',
         body: formData,
       })
       const data = await parseApiResponse<UploadResponse>(response)
@@ -420,9 +437,50 @@ function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
+  async function handleAccessLogin(password: string) {
+    setAuthError('')
+    setIsAuthenticating(true)
+    try {
+      const data = await fetchJson<AuthStatus>('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      setAuthStatus(data)
+      resetFlow(selectedAiProvider)
+    } catch (loginError) {
+      setAuthError(getErrorText(loginError))
+    } finally {
+      setIsAuthenticating(false)
+    }
+  }
+
+  async function handleLogout() {
+    await fetchJson<{ authenticated: boolean }>('/api/auth/logout', { method: 'POST' }).catch(() => null)
+    resetFlow(selectedAiProvider)
+    setAuthStatus((current) => ({
+      required: current?.required ?? true,
+      authenticated: false,
+    }))
+  }
+
+  if (!authStatus) {
+    return <LoadingScreen />
+  }
+
+  if (authStatus.required && !authStatus.authenticated) {
+    return (
+      <AccessGate
+        error={authError}
+        isAuthenticating={isAuthenticating}
+        onSubmit={handleAccessLogin}
+      />
+    )
+  }
+
   return (
     <main className="app-shell">
-      <TopBar currentStep={step} />
+      <TopBar currentStep={step} showLogout={authStatus.required} onLogout={handleLogout} />
 
       {step === 'upload' && (
         <UploadView
@@ -520,7 +578,72 @@ function App() {
   )
 }
 
-function TopBar({ currentStep }: { currentStep: Step }) {
+function LoadingScreen() {
+  return (
+    <main className="access-shell">
+      <div className="access-card loading-card">
+        <span className="brand-mark">
+          <Loader2 className="spin" size={18} />
+        </span>
+        <strong className="brand-title">Moonwalk</strong>
+      </div>
+    </main>
+  )
+}
+
+function AccessGate({
+  error,
+  isAuthenticating,
+  onSubmit,
+}: {
+  error: string
+  isAuthenticating: boolean
+  onSubmit: (password: string) => void
+}) {
+  const [password, setPassword] = useState('')
+
+  function submit(event: FormEvent) {
+    event.preventDefault()
+    onSubmit(password)
+  }
+
+  return (
+    <main className="access-shell">
+      <form className="access-card" onSubmit={submit}>
+        <span className="brand-mark">
+          <Sparkles size={18} />
+        </span>
+        <strong className="brand-title">Moonwalk</strong>
+        <h1>请输入访问密码</h1>
+        <label className="field-block">
+          <span>访问密码</span>
+          <input
+            autoComplete="current-password"
+            autoFocus
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+        </label>
+        <button className="primary-button full" disabled={isAuthenticating || !password.trim()}>
+          {isAuthenticating ? <Loader2 className="spin" size={18} /> : <ChevronRight size={18} />}
+          {isAuthenticating ? '正在验证' : '进入网站'}
+        </button>
+        {error && <ErrorNotice message={error} />}
+      </form>
+    </main>
+  )
+}
+
+function TopBar({
+  currentStep,
+  showLogout,
+  onLogout,
+}: {
+  currentStep: Step
+  showLogout: boolean
+  onLogout: () => void
+}) {
   const items = [
     ['upload', '上传材料'],
     ['summary', '确认摘要'],
@@ -539,14 +662,21 @@ function TopBar({ currentStep }: { currentStep: Step }) {
             <span>生成选择测试与开放式追问</span>
           </div>
         </div>
-      <nav className="stepper" aria-label="流程">
-        {items.map(([id, label], index) => (
-          <div className={`step-item ${currentStep === id ? 'active' : ''}`} key={id}>
-            <span>{index + 1}</span>
-            {label}
-          </div>
-        ))}
-      </nav>
+      <div className="top-actions">
+        <nav className="stepper" aria-label="流程">
+          {items.map(([id, label], index) => (
+            <div className={`step-item ${currentStep === id ? 'active' : ''}`} key={id}>
+              <span>{index + 1}</span>
+              {label}
+            </div>
+          ))}
+        </nav>
+        {showLogout && (
+          <button className="ghost-button" onClick={onLogout}>
+            退出访问
+          </button>
+        )}
+      </div>
     </header>
   )
 }
@@ -1488,7 +1618,10 @@ function ErrorNotice({
 }
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBase}${url}`, options)
+  const response = await fetch(`${apiBase}${url}`, {
+    ...options,
+    credentials: options?.credentials || 'include',
+  })
   return parseApiResponse<T>(response)
 }
 

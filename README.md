@@ -36,6 +36,14 @@ PORT=5174
 
 如果暂时不使用 GPT-5.5，可以不填 `OPENAI_API_KEY`；首页会显示 GPT-5.5 未配置。
 
+如果需要启用全站访问密码，可以配置：
+
+```bash
+ACCESS_PASSWORD=共享访问密码
+```
+
+本地开发时不配置 `ACCESS_PASSWORD`，网站会默认不启用密码门。生产环境配置后，浏览器关闭前保持登录，退出访问会清除会话。
+
 3. 启动前后端：
 
 ```bash
@@ -85,6 +93,7 @@ cloudflared tunnel --url http://localhost:5174
   - `OPENAI_API_KEY`: 你的 OpenAI API Key
   - `OPENAI_MODEL`: `gpt-5.5`
   - `OPENAI_REASONING_EFFORT`: `low`
+  - `ACCESS_PASSWORD`: 共享访问密码
   - `NODE_ENV`: `production`
 
 部署后，Render 提供的公网域名会同时托管页面和 `/api` 接口。

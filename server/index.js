@@ -2,6 +2,7 @@ import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
 import multer from 'multer'
+import { createHmac, timingSafeEqual } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
@@ -40,13 +41,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const distDir = path.resolve(__dirname, '../dist')
 const uploadRoot = await mkdtemp(path.join(os.tmpdir(), 'material-quiz-uploads-'))
 const sessions = new Map()
+const accessPassword = String(process.env.ACCESS_PASSWORD || '').trim()
+const accessAuthEnabled = Boolean(accessPassword)
+const accessCookieName = 'moonwalk_access'
 
 const upload = multer({
   dest: uploadRoot,
   limits: { fileSize: MAX_FILE_SIZE },
 })
 
-app.use(cors())
+app.use(cors({ origin: true, credentials: true }))
 app.use(express.json({ limit: '2mb' }))
 
 app.get('/api/health', (_req, res) => {
@@ -58,6 +62,7 @@ app.get('/api/health', (_req, res) => {
     aiProviderId: defaultProvider.id,
     aiModel: defaultProvider.model,
     lowCostModelSelected: defaultProvider.lowCostModelSelected,
+    accessAuthRequired: accessAuthEnabled,
     defaultAiProvider: DEFAULT_AI_PROVIDER,
     aiProviders: listAiProviders(),
     limits: {
@@ -72,6 +77,46 @@ app.get('/api/health', (_req, res) => {
     },
   })
 })
+
+app.get('/api/auth/status', (req, res) => {
+  res.json({
+    required: accessAuthEnabled,
+    authenticated: !accessAuthEnabled || hasValidAccessCookie(req),
+  })
+})
+
+app.post('/api/auth/login', (req, res) => {
+  if (!accessAuthEnabled) {
+    res.json({ required: false, authenticated: true })
+    return
+  }
+
+  const password = String(req.body?.password || '')
+  if (!safeEqual(password, accessPassword)) {
+    res.status(401).json({ error: '访问密码不正确，请重新输入。' })
+    return
+  }
+
+  res.cookie(accessCookieName, buildAccessToken(), {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+  })
+  res.json({ required: true, authenticated: true })
+})
+
+app.post('/api/auth/logout', (_req, res) => {
+  res.clearCookie(accessCookieName, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+  })
+  res.json({ authenticated: false })
+})
+
+app.use('/api', requireAccess)
 
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
@@ -239,6 +284,45 @@ function getSessionAiProvider(session, requestedProviderId) {
     throw new Error('当前材料已经锁定使用另一种 AI 模型，请回到首页重新上传后再切换模型。')
   }
   return getAiProvider(sessionProviderId)
+}
+
+function requireAccess(req, res, next) {
+  if (!accessAuthEnabled || hasValidAccessCookie(req)) {
+    next()
+    return
+  }
+  res.status(401).json({ error: '请先输入访问密码。' })
+}
+
+function hasValidAccessCookie(req) {
+  const cookies = parseCookies(req.headers.cookie || '')
+  return safeEqual(cookies[accessCookieName] || '', buildAccessToken())
+}
+
+function buildAccessToken() {
+  if (!accessAuthEnabled) return ''
+  return createHmac('sha256', accessPassword).update('moonwalk-access-v1').digest('hex')
+}
+
+function parseCookies(cookieHeader) {
+  return Object.fromEntries(
+    cookieHeader
+      .split(';')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const index = part.indexOf('=')
+        if (index === -1) return [part, '']
+        return [decodeURIComponent(part.slice(0, index)), decodeURIComponent(part.slice(index + 1))]
+      }),
+  )
+}
+
+function safeEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left))
+  const rightBuffer = Buffer.from(String(right))
+  if (leftBuffer.length !== rightBuffer.length) return false
+  return timingSafeEqual(leftBuffer, rightBuffer)
 }
 
 function normalizeSettings(body) {

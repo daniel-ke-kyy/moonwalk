@@ -3,6 +3,48 @@
   color: var(--ink);
 }
 
+.access-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+  color: var(--ink);
+}
+
+.access-card {
+  display: grid;
+  gap: 18px;
+  width: min(430px, 100%);
+  padding: 34px;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.84);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--soft-shadow);
+}
+
+.access-card .brand-mark {
+  margin: 0 auto;
+}
+
+.access-card .brand-title {
+  font-size: 44px;
+}
+
+.access-card h1 {
+  font-size: 28px;
+}
+
+.access-card .field-block {
+  text-align: left;
+}
+
+.loading-card {
+  justify-items: center;
+  width: auto;
+  min-width: 260px;
+}
+
 .top-bar {
   position: sticky;
   top: 0;
@@ -68,6 +110,14 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.top-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: 0;
 }
 
 .step-item {
@@ -1132,6 +1182,12 @@ legend {
     flex-direction: column;
   }
 
+  .top-actions {
+    align-items: flex-start;
+    flex-direction: column;
+    width: 100%;
+  }
+
   .summary-heading {
     gap: 18px;
   }
@@ -1188,6 +1244,10 @@ legend {
 
   .top-bar {
     padding: 14px 16px;
+  }
+
+  .access-card {
+    padding: 22px;
   }
 
   .upload-panel,
