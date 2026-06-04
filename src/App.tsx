@@ -236,10 +236,28 @@ type PptSessionResponse = {
   plan: PptPlan | null
   output: {
     generatedAt: string
+    engine?: 'template-fill' | 'fallback'
     previewUrls: string[]
     pptxDownloadUrl: string
     pdfDownloadUrl: string | null
+    templateFill?: {
+      checkSummary: {
+        ok: number
+        warn: number
+        error: number
+      }
+    } | null
   } | null
+}
+
+type PptJobResponse = {
+  jobId: string
+  sessionId: string
+  type: 'generate' | 'revise'
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  message: string
+  error: string
+  result: PptSessionResponse | null
 }
 
 type PptSlideComments = Record<number, string>
@@ -616,7 +634,7 @@ function App() {
     setError('')
     setIsGeneratingPpt(true)
     try {
-      const data = await fetchJson<PptSessionResponse>('/api/ppt/generate', {
+      const job = await fetchJson<PptJobResponse>('/api/ppt/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -631,6 +649,7 @@ function App() {
           requirements: pptRequirements,
         }),
       })
+      const data = await waitForPptJob(job.jobId)
       setPptSession(data)
       setPptSlideComments({})
       setStep('pptPreview')
@@ -655,7 +674,7 @@ function App() {
     setError('')
     setIsRevisingPpt(true)
     try {
-      const data = await fetchJson<PptSessionResponse>('/api/ppt/revise', {
+      const job = await fetchJson<PptJobResponse>('/api/ppt/revise', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -664,6 +683,7 @@ function App() {
           slideComments,
         }),
       })
+      const data = await waitForPptJob(job.jobId)
       setPptSession(data)
       setPptSlideComments({})
       window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -2204,7 +2224,7 @@ function PptSetupView({
             onClick={() => onGenerate()}
           >
             {isGenerating ? <Loader2 className="spin" size={18} /> : <ChevronRight size={18} />}
-            {isGenerating ? '正在生成 PPT' : '生成 PPT 初稿'}
+            {isGenerating ? '正在生成，可能需要几分钟' : '生成 PPT 初稿'}
           </button>
 
           {error && (
@@ -2286,7 +2306,10 @@ function PptPreviewView({
         <div>
           <span className="eyebrow">PPT 初稿预览</span>
           <h1>{session.plan?.title || '已生成 PPT 初稿'}</h1>
-          <p>预览由真实 PPTX 转换而来，与下载终稿保持一致。可以逐页填写修改意见后重新生成。</p>
+          <p>
+            预览由真实 PPTX 转换而来，与下载终稿保持一致。
+            {session.output?.engine === 'template-fill' ? '本次已使用模板填充引擎。' : '本次使用普通生成引擎。'}
+          </p>
         </div>
         <div className="result-actions">
           <button className="secondary-button" onClick={onBack}>
@@ -2295,7 +2318,7 @@ function PptPreviewView({
           </button>
           <button className="secondary-button" disabled={isRevising} onClick={onRevise}>
             {isRevising ? <Loader2 className="spin" size={17} /> : <RefreshCcw size={17} />}
-            {isRevising ? '正在重新生成' : '根据修改意见重新生成'}
+            {isRevising ? '正在重新生成，可能需要几分钟' : '根据修改意见重新生成'}
           </button>
           <button className="primary-button" onClick={onFinal}>
             生成终稿
@@ -2462,6 +2485,23 @@ async function parseApiResponse<T>(response: Response): Promise<T> {
     throw new Error(data?.error || '请求失败。')
   }
   return data as T
+}
+
+async function waitForPptJob(jobId: string): Promise<PptSessionResponse> {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < 20 * 60 * 1000) {
+    await delay(2500)
+    const job = await fetchJson<PptJobResponse>(`/api/ppt/jobs/${jobId}`)
+    if (job.status === 'completed' && job.result) return job.result
+    if (job.status === 'failed') {
+      throw new Error(job.error || 'PPT 生成失败，请重试。')
+    }
+  }
+  throw new Error('PPT 生成时间过长，请稍后刷新或重新生成。')
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
 function getErrorText(error: unknown) {

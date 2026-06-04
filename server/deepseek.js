@@ -2,8 +2,10 @@ import { emptyMaterialSummary } from './types.js'
 import {
   buildPptPlanPrompt,
   buildPptRevisionPrompt,
+  buildPptTemplateFillPrompt,
   normalizePptPlan,
 } from './pptPlan.js'
+import { normalizeTemplateFillPlan } from './pptTemplateFill.js'
 
 const DEEPSEEK_API_URL = process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/chat/completions'
 const modelName = process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash'
@@ -302,6 +304,26 @@ export async function generatePptPlan(context) {
   })
 
   return normalizePptPlan(parseJsonResponse(payload), context.slideCount, context.fallbackTitle)
+}
+
+export async function generatePptTemplateFillPlan(context) {
+  const payload = await callDeepSeek({
+    temperature: 0.28,
+    maxTokens: Math.max(4096, context.slideCount * 1200),
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是中文 PPT 模板填充策划助手。你只负责根据模板页面库生成 fill_plan JSON，不生成图片，不输出 Markdown。必须只输出有效 JSON。',
+      },
+      {
+        role: 'user',
+        content: buildPptTemplateFillPrompt(context),
+      },
+    ],
+  })
+
+  return normalizeTemplateFillPlan(parseJsonResponse(payload), context.templateFillLibraryRaw, context.slideCount)
 }
 
 export async function revisePptPlan(context) {

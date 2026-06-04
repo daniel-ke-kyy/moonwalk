@@ -33,6 +33,15 @@ import {
 } from './pptPlan.js'
 import { getCommandVersion, renderDocumentToPreviews } from './pptRenderer.js'
 import {
+  analyzeTemplateFillLibrary,
+  applyTemplateFillPlan,
+  checkTemplateFillPlan,
+  pruneSlideLibraryForAi,
+  summarizeTemplateFillCheck,
+  templateFillPlanToPptPlan,
+  writeTemplateFillPlan,
+} from './pptTemplateFill.js'
+import {
   analyzeMasterFile,
   analyzeTemplateFiles,
   buildMasterContext,
@@ -57,6 +66,7 @@ const distDir = path.resolve(__dirname, '../dist')
 const uploadRoot = await mkdtemp(path.join(os.tmpdir(), 'material-quiz-uploads-'))
 const sessions = new Map()
 const pptSessions = new Map()
+const pptJobs = new Map()
 const accessPassword = String(process.env.ACCESS_PASSWORD || '').trim()
 const accessAuthEnabled = Boolean(accessPassword)
 const accessCookieName = 'moonwalk_access'
@@ -254,11 +264,23 @@ app.post('/api/ppt/generate', async (req, res) => {
     assertAiProviderReady(aiProvider)
 
     applyPptSettings(session, settings)
-    const plan = await aiProvider.module.generatePptPlan(buildPptAiContext(session))
-    await renderPptSessionOutput(session, plan)
-    res.json(serializePptSession(session))
+    const job = createPptJob(session.id, 'generate')
+    runPptJob(job, async () => {
+      await generatePptSessionOutput(session, aiProvider)
+      return serializePptSession(session)
+    })
+    res.json(serializePptJob(job))
   } catch (error) {
     res.status(400).json({ error: toUserError(error) })
+  }
+})
+
+app.get('/api/ppt/jobs/:jobId', (req, res) => {
+  try {
+    const job = getPptJob(req.params.jobId)
+    res.json(serializePptJob(job))
+  } catch (error) {
+    res.status(404).json({ error: toUserError(error) })
   }
 })
 
@@ -273,13 +295,17 @@ app.post('/api/ppt/revise', async (req, res) => {
       throw new Error('还没有生成 PPT 初稿，请先生成预览。')
     }
 
-    const plan = await aiProvider.module.revisePptPlan({
-      ...buildPptAiContext(session),
-      currentPlan: session.plan,
-      slideComments: settings.slideComments,
+    const job = createPptJob(session.id, 'revise')
+    runPptJob(job, async () => {
+      const plan = await aiProvider.module.revisePptPlan({
+        ...buildPptAiContext(session),
+        currentPlan: session.plan,
+        slideComments: settings.slideComments,
+      })
+      await renderPptSessionOutput(session, plan, { engine: 'fallback' })
+      return serializePptSession(session)
     })
-    await renderPptSessionOutput(session, plan)
-    res.json(serializePptSession(session))
+    res.json(serializePptJob(job))
   } catch (error) {
     res.status(400).json({ error: toUserError(error) })
   }
@@ -442,6 +468,68 @@ function getPptSession(sessionId) {
     throw new Error('当前 PPT 生成会话不存在，请回到首页重新开始。')
   }
   return session
+}
+
+function getPptJob(jobId) {
+  const job = pptJobs.get(jobId)
+  if (!job) {
+    throw new Error('当前 PPT 生成任务不存在，请重新生成。')
+  }
+  return job
+}
+
+function createPptJob(sessionId, type) {
+  const job = {
+    id: nanoid(),
+    sessionId,
+    type,
+    status: 'queued',
+    message: '任务已创建，正在排队。',
+    result: null,
+    error: '',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+  pptJobs.set(job.id, job)
+  return job
+}
+
+function runPptJob(job, handler) {
+  queueMicrotask(async () => {
+    try {
+      updatePptJob(job, { status: 'running', message: '正在生成 PPT，请稍候。' })
+      const result = await handler()
+      updatePptJob(job, {
+        status: 'completed',
+        message: 'PPT 已生成。',
+        result,
+      })
+    } catch (error) {
+      updatePptJob(job, {
+        status: 'failed',
+        message: 'PPT 生成失败。',
+        error: toUserError(error),
+      })
+    }
+  })
+}
+
+function updatePptJob(job, patch) {
+  Object.assign(job, patch, { updatedAt: new Date().toISOString() })
+}
+
+function serializePptJob(job) {
+  return {
+    jobId: job.id,
+    sessionId: job.sessionId,
+    type: job.type,
+    status: job.status,
+    message: job.message,
+    error: job.error,
+    result: job.result,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  }
 }
 
 function getSessionAiProvider(session, requestedProviderId) {
@@ -641,7 +729,77 @@ function buildPptAiContext(session) {
   }
 }
 
-async function renderPptSessionOutput(session, plan) {
+async function generatePptSessionOutput(session, aiProvider) {
+  const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
+  const canUseTemplateFill = mainTemplate?.extension === '.pptx' && !session.master
+  if (canUseTemplateFill && typeof aiProvider.module.generatePptTemplateFillPlan === 'function') {
+    try {
+      await renderTemplateFillSessionOutput(session, aiProvider, mainTemplate)
+      return
+    } catch (error) {
+      console.warn(`PPT Master template-fill 失败，回退到原生成器：${toUserError(error)}`)
+      session.templateFillFallbackReason = toUserError(error)
+    }
+  }
+
+  const plan = await aiProvider.module.generatePptPlan(buildPptAiContext(session))
+  await renderPptSessionOutput(session, plan, { engine: 'fallback' })
+}
+
+async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate) {
+  const versionId = nanoid(8)
+  const outputDir = path.join(session.sessionDir, 'outputs', versionId)
+  const analysisDir = path.join(outputDir, 'template-fill')
+  const previewDir = path.join(outputDir, 'preview')
+  await mkdir(analysisDir, { recursive: true })
+  const libraryPath = path.join(analysisDir, 'slide_library.json')
+  const planPath = path.join(analysisDir, 'fill_plan.json')
+  const checkPath = path.join(analysisDir, 'check_report.json')
+  const pptxPath = path.join(outputDir, 'moonwalk-template-filled.pptx')
+
+  const library = await analyzeTemplateFillLibrary(mainTemplate.path, libraryPath)
+  const templateFillLibrary = pruneSlideLibraryForAi(library)
+  const fillPlan = await aiProvider.module.generatePptTemplateFillPlan({
+    ...buildPptAiContext(session),
+    templateFillLibrary,
+    templateFillLibraryRaw: library,
+  })
+  const replacementCount = fillPlan.slides.reduce((total, slide) => total + slide.replacements.length, 0)
+  if (replacementCount < Math.max(3, Math.ceil(session.slideCount * 1.5))) {
+    throw new Error('模板填充计划有效替换内容太少，已回退到普通生成。')
+  }
+  await writeTemplateFillPlan(planPath, fillPlan)
+
+  const checkReport = await checkTemplateFillPlan(libraryPath, planPath, checkPath)
+  const checkSummary = summarizeTemplateFillCheck(checkReport)
+  if (checkSummary.error > 0) {
+    throw new Error(`模板填充计划存在 ${checkSummary.error} 个错误，无法应用。`)
+  }
+  if (checkSummary.warn > Math.max(3, Math.floor(session.slideCount / 2))) {
+    throw new Error(`模板填充计划有 ${checkSummary.warn} 个容量警告，已回退到普通生成。`)
+  }
+
+  const generatedPptxPath = await applyTemplateFillPlan(mainTemplate.path, planPath, pptxPath)
+  const rendered = await renderDocumentToPreviews(generatedPptxPath, previewDir, { prefix: 'slide', dpi: 128 })
+  const plan = templateFillPlanToPptPlan(fillPlan, mainTemplate.originalName || 'Moonwalk PPT')
+  session.plan = plan
+  session.output = {
+    versionId,
+    engine: 'template-fill',
+    pptxPath: generatedPptxPath,
+    pdfPath: rendered.pdfPath,
+    previewPaths: rendered.previewPaths,
+    generatedAt: new Date().toISOString(),
+    templateFill: {
+      checkSummary,
+      libraryPath,
+      planPath,
+      checkPath,
+    },
+  }
+}
+
+async function renderPptSessionOutput(session, plan, options = {}) {
   const versionId = nanoid(8)
   const outputDir = path.join(session.sessionDir, 'outputs', versionId)
   await mkdir(outputDir, { recursive: true })
@@ -679,6 +837,7 @@ async function renderPptSessionOutput(session, plan) {
   session.plan = plan
   session.output = {
     versionId,
+    engine: options.engine || 'fallback',
     pptxPath,
     pdfPath,
     previewPaths,
@@ -725,9 +884,15 @@ function serializePptSession(session) {
     output: session.output
       ? {
           generatedAt: session.output.generatedAt,
+          engine: session.output.engine || 'fallback',
           previewUrls: session.output.previewPaths.map((filePath) => toUploadFileUrl(filePath)),
           pptxDownloadUrl: `/api/ppt/${session.id}/download/pptx`,
           pdfDownloadUrl: session.output.pdfPath ? `/api/ppt/${session.id}/download/pdf` : null,
+          templateFill: session.output.templateFill
+            ? {
+                checkSummary: session.output.templateFill.checkSummary,
+              }
+            : null,
         }
       : null,
   }

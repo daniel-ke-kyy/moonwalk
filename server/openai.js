@@ -8,8 +8,10 @@ import {
 import {
   buildPptPlanPrompt,
   buildPptRevisionPrompt,
+  buildPptTemplateFillPrompt,
   normalizePptPlan,
 } from './pptPlan.js'
+import { normalizeTemplateFillPlan } from './pptTemplateFill.js'
 
 const OPENAI_API_URL = normalizeOpenAiApiUrl()
 const modelName = process.env.OPENAI_MODEL || 'gpt-5.5'
@@ -268,6 +270,18 @@ export async function generatePptPlan(context) {
   })
 
   return normalizePptPlan(parseJsonResponse(payload, 'GPT-5.5'), context.slideCount, context.fallbackTitle)
+}
+
+export async function generatePptTemplateFillPlan(context) {
+  const payload = await callOpenAi({
+    temperature: 0.28,
+    maxTokens: Math.max(4096, context.slideCount * 1200),
+    instructions:
+      '你是中文 PPT 模板填充策划助手。你只负责根据模板页面库生成 fill_plan JSON，不生成图片，不输出 Markdown。必须只输出有效 JSON。',
+    input: buildPptTemplateFillPrompt(context),
+  })
+
+  return normalizeTemplateFillPlan(parseJsonResponse(payload, 'GPT-5.5'), context.templateFillLibraryRaw, context.slideCount)
 }
 
 export async function revisePptPlan(context) {
