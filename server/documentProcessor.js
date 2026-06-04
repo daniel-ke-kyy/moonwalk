@@ -70,7 +70,7 @@ export async function prepareDocumentForAi(filePath, _originalName, extension) {
     return {
       textContext,
       processingNotes: [
-        'PDF 已本地提取可复制文字后交给 DeepSeek 分析。扫描版图片文字和复杂图表暂不参与理解。',
+        'PDF 已本地提取可复制文字后交给所选 AI 分析。扫描版图片文字和复杂图表暂不参与理解。',
       ],
     }
   }
@@ -80,7 +80,7 @@ export async function prepareDocumentForAi(filePath, _originalName, extension) {
     return {
       textContext,
       processingNotes: [
-        'DOCX 已本地提取正文后交给 DeepSeek 分析。文档内图片和复杂图示暂不参与理解。',
+        'DOCX 已本地提取正文后交给所选 AI 分析。文档内图片和复杂图示暂不参与理解。',
       ],
     }
   }
@@ -89,7 +89,7 @@ export async function prepareDocumentForAi(filePath, _originalName, extension) {
   return {
     textContext,
     processingNotes: [
-      'PPTX 已本地提取幻灯片文字后交给 DeepSeek 分析。图片、流程图和截图文字暂不参与理解。',
+      'PPTX 已本地提取幻灯片文字后交给所选 AI 分析。图片、流程图和截图文字暂不参与理解。',
     ],
   }
 }

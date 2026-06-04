@@ -1226,7 +1226,7 @@ function SummaryView({
   onGenerateOpen: (event: FormEvent) => void
   onBack: () => void
 }) {
-  const { summary, fileInfo, processingNotes } = uploadResult
+  const { summary, fileInfo } = uploadResult
   const questionCounts = health?.limits.questionCounts || fallbackQuestionCounts
   const difficulties = health?.limits.difficulties || fallbackDifficulties
   const openQuestionMin = health?.limits.openQuestionMin || fallbackOpenQuestionMin
@@ -1470,11 +1470,6 @@ function SummaryView({
         </div>
       </section>
 
-      <section className="notes-line">
-        {processingNotes.map((note) => (
-          <span key={note}>{note}</span>
-        ))}
-      </section>
     </section>
   )
 }
