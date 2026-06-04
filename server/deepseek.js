@@ -317,19 +317,19 @@ async function callDeepSeek({ messages, temperature, maxTokens }) {
   return content
 }
 
-function parseJsonResponse(text) {
+export function parseJsonResponse(text, providerLabel = 'DeepSeek') {
   try {
     return JSON.parse(text)
   } catch {
     const match = text.match(/\{[\s\S]*\}/)
     if (!match) {
-      throw new Error('DeepSeek 返回的内容不是有效 JSON。')
+      throw new Error(`${providerLabel} 返回的内容不是有效 JSON。`)
     }
     return JSON.parse(match[0])
   }
 }
 
-function normalizeSummary(value) {
+export function normalizeSummary(value) {
   const summary = { ...emptyMaterialSummary, ...value }
   const keyPoints = Array.isArray(summary.keyPoints) ? summary.keyPoints : []
   summary.keyPoints = keyPoints.map((point, index) => ({
@@ -358,7 +358,7 @@ function normalizeSummary(value) {
   return summary
 }
 
-function normalizeQuiz(value, expectedCount) {
+export function normalizeQuiz(value, expectedCount, providerLabel = 'DeepSeek') {
   const questions = Array.isArray(value?.questions) ? value.questions : []
   const normalized = questions.slice(0, expectedCount).map((question, index) => {
     const type = question.type === 'multiple' ? 'multiple' : 'single'
@@ -390,13 +390,13 @@ function normalizeQuiz(value, expectedCount) {
   })
 
   if (normalized.length !== expectedCount) {
-    throw new Error(`DeepSeek 返回了 ${normalized.length} 道题，未达到要求的 ${expectedCount} 道题。请重试。`)
+    throw new Error(`${providerLabel} 返回了 ${normalized.length} 道题，未达到要求的 ${expectedCount} 道题。请重试。`)
   }
 
   return { questions: normalized }
 }
 
-function normalizeOpenQuestions(value, expectedCount) {
+export function normalizeOpenQuestions(value, expectedCount, providerLabel = 'DeepSeek') {
   const questions = Array.isArray(value?.questions) ? value.questions : []
   const normalized = questions.slice(0, expectedCount).map((question, index) => ({
     id: String(question.id || `oq${index + 1}`),
@@ -406,7 +406,7 @@ function normalizeOpenQuestions(value, expectedCount) {
   }))
 
   if (normalized.length !== expectedCount) {
-    throw new Error(`DeepSeek 返回了 ${normalized.length} 个开放式问题，未达到要求的 ${expectedCount} 个。请重试。`)
+    throw new Error(`${providerLabel} 返回了 ${normalized.length} 个开放式问题，未达到要求的 ${expectedCount} 个。请重试。`)
   }
 
   return {
@@ -415,7 +415,7 @@ function normalizeOpenQuestions(value, expectedCount) {
   }
 }
 
-function normalizeOpenFeedback(value, answerItems) {
+export function normalizeOpenFeedback(value, answerItems) {
   const diagnosis = value?.overallDiagnosis || {}
   const feedback = Array.isArray(value?.feedback) ? value.feedback : []
 

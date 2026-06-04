@@ -21,12 +21,24 @@ type QuestionType = 'single' | 'multiple'
 type OptionId = 'A' | 'B' | 'C' | 'D'
 type Step = 'upload' | 'summary' | 'quiz' | 'result'
 type AssessmentMode = 'knowledge' | 'open'
+type AiProviderId = 'deepseek' | 'openai'
+
+type AiProviderStatus = {
+  id: AiProviderId
+  label: string
+  configured: boolean
+  model: string
+  lowCostModelSelected: boolean
+}
 
 type Health = {
   aiConfigured: boolean
   aiProvider: string
+  aiProviderId?: AiProviderId
   aiModel: string
   lowCostModelSelected: boolean
+  defaultAiProvider?: AiProviderId
+  aiProviders?: AiProviderStatus[]
   limits: {
     allowedExtensions: string[]
     maxFileSizeMB: number
@@ -71,6 +83,7 @@ type FileInfo = {
 
 type UploadResponse = {
   sessionId: string
+  aiProvider?: AiProviderId
   fileInfo: FileInfo
   processingNotes: string[]
   summary: MaterialSummary
@@ -109,6 +122,7 @@ type OpenQuestionSet = {
 }
 
 type FeedbackContext = {
+  aiProvider?: AiProviderId
   fileInfo: FileInfo
   prepared: {
     textContext: string
@@ -148,6 +162,23 @@ const fallbackQuestionCounts = [5, 10, 15, 20, 30]
 const fallbackOpenQuestionMin = 1
 const fallbackOpenQuestionMax = 10
 const fallbackDifficulties: Difficulty[] = ['简单', '中等', '困难']
+const defaultAiProvider: AiProviderId = 'deepseek'
+const fallbackAiProviders: AiProviderStatus[] = [
+  {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    configured: false,
+    model: 'deepseek-v4-flash',
+    lowCostModelSelected: true,
+  },
+  {
+    id: 'openai',
+    label: 'GPT-5.5',
+    configured: false,
+    model: 'gpt-5.5',
+    lowCostModelSelected: true,
+  },
+]
 const importanceLabels: Record<Importance, string> = {
   high: '重点',
   medium: '常规',
@@ -156,6 +187,8 @@ const importanceLabels: Record<Importance, string> = {
 
 function App() {
   const [health, setHealth] = useState<Health | null>(null)
+  const [selectedAiProvider, setSelectedAiProvider] = useState<AiProviderId>(defaultAiProvider)
+  const [lockedAiProvider, setLockedAiProvider] = useState<AiProviderId>(defaultAiProvider)
   const [step, setStep] = useState<Step>('upload')
   const [assessmentMode, setAssessmentMode] = useState<AssessmentMode>('knowledge')
   const [uploadResult, setUploadResult] = useState<UploadResponse | null>(null)
@@ -183,6 +216,8 @@ function App() {
     fetchJson<Health>('/api/health')
       .then((data) => {
         setHealth(data)
+        setSelectedAiProvider(data.defaultAiProvider || data.aiProviderId || defaultAiProvider)
+        setLockedAiProvider(data.defaultAiProvider || data.aiProviderId || defaultAiProvider)
         if (data.limits.questionCounts?.length) {
           setQuestionCount(data.limits.questionCounts.includes(10) ? 10 : data.limits.questionCounts[0])
         }
@@ -210,12 +245,14 @@ function App() {
     try {
       const formData = new FormData()
       formData.append('file', file)
+      formData.append('aiProvider', selectedAiProvider)
       const response = await fetch(`${apiBase}/api/upload`, {
         method: 'POST',
         body: formData,
       })
       const data = await parseApiResponse<UploadResponse>(response)
       setUploadResult(data)
+      setLockedAiProvider(data.aiProvider || selectedAiProvider)
       setSelectedKeyPointIds(data.summary.keyPoints.map((point) => point.id))
       setSelectedSectionIndexes(data.summary.sections.map((_, index) => index))
       setAssessmentMode('knowledge')
@@ -249,6 +286,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sessionId: uploadResult.sessionId,
+          aiProvider: lockedAiProvider,
           questionCount,
           difficulty,
           focusOnly,
@@ -284,6 +322,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sessionId: uploadResult.sessionId,
+          aiProvider: lockedAiProvider,
           questionCount: openQuestionCount,
           writingGoal,
           selectedSectionIndexes,
@@ -323,6 +362,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sessionId: uploadResult.sessionId,
+          aiProvider: lockedAiProvider,
           answers: openAnswers,
           feedbackContext: withFeedbackQuestionSet(openQuestionSet, writingGoal).feedbackContext,
         }),
@@ -337,7 +377,7 @@ function App() {
     }
   }
 
-  function resetAll() {
+  function resetFlow(nextAiProvider: AiProviderId) {
     setStep('upload')
     setUploadResult(null)
     setQuiz(null)
@@ -349,9 +389,19 @@ function App() {
     setOpenAnswers({})
     setCurrentIndex(0)
     setAssessmentMode('knowledge')
+    setLockedAiProvider(nextAiProvider)
     setWritingGoal('')
     setError('')
     setMissingIds([])
+  }
+
+  function resetAll() {
+    resetFlow(selectedAiProvider)
+  }
+
+  function resetForDeepSeekRetry() {
+    setSelectedAiProvider('deepseek')
+    resetFlow('deepseek')
   }
 
   function backToSummaryFromResult() {
@@ -377,8 +427,11 @@ function App() {
       {step === 'upload' && (
         <UploadView
           health={health}
+          selectedAiProvider={selectedAiProvider}
+          setSelectedAiProvider={setSelectedAiProvider}
           isUploading={isUploading}
           error={error}
+          onSwitchToDeepSeek={resetForDeepSeekRetry}
           onUpload={handleUpload}
         />
       )}
@@ -407,6 +460,8 @@ function App() {
           health={health}
           isGenerating={isGenerating}
           error={error}
+          lockedAiProvider={lockedAiProvider}
+          onSwitchToDeepSeek={resetForDeepSeekRetry}
           onGenerate={handleGenerate}
           onGenerateOpen={handleGenerateOpen}
           onBack={resetAll}
@@ -435,6 +490,8 @@ function App() {
           setAnswers={setOpenAnswers}
           isReviewing={isReviewingOpen}
           error={error}
+          lockedAiProvider={lockedAiProvider}
+          onSwitchToDeepSeek={resetForDeepSeekRetry}
           onSubmit={handleSubmitOpenAnswers}
           onBack={() => setStep('summary')}
         />
@@ -496,13 +553,19 @@ function TopBar({ currentStep }: { currentStep: Step }) {
 
 function UploadView({
   health,
+  selectedAiProvider,
+  setSelectedAiProvider,
   isUploading,
   error,
+  onSwitchToDeepSeek,
   onUpload,
 }: {
   health: Health | null
+  selectedAiProvider: AiProviderId
+  setSelectedAiProvider: (provider: AiProviderId) => void
   isUploading: boolean
   error: string
+  onSwitchToDeepSeek: () => void
   onUpload: (file: File | null) => void
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -522,7 +585,7 @@ function UploadView({
         </div>
         <h1 className="hero-title">Moonwalk</h1>
         <p>
-          使用 DeepSeek API 分析本地提取的材料文字，生成知识检测或批判性开放式追问。
+          使用选定 AI 分析本地提取的材料文字，生成知识检测或批判性开放式追问。
         </p>
       </div>
 
@@ -552,7 +615,7 @@ function UploadView({
         <h2>{isUploading ? '正在识别材料' : '上传学习材料'}</h2>
         <p>
           {isUploading
-            ? '正在提取材料文字并调用 DeepSeek 分析，请稍等。'
+            ? `正在提取材料文字并调用 ${getAiProviderLabel(health, selectedAiProvider)} 分析，请稍等。`
             : '拖拽文件到这里，或点击按钮选择文件。'}
         </p>
         <button className="primary-button" disabled={isUploading} onClick={() => inputRef.current?.click()}>
@@ -566,19 +629,71 @@ function UploadView({
         </div>
       </div>
 
-      <StatusStrip health={health} />
-      {error && <ErrorNotice message={error} />}
+      <AiProviderSelector
+        health={health}
+        selectedAiProvider={selectedAiProvider}
+        setSelectedAiProvider={setSelectedAiProvider}
+        disabled={isUploading}
+      />
+      <StatusStrip health={health} selectedAiProvider={selectedAiProvider} />
+      {error && (
+        <ErrorNotice
+          message={error}
+          actionLabel={selectedAiProvider === 'openai' ? '切换到 DeepSeek 重试' : undefined}
+          onAction={selectedAiProvider === 'openai' ? onSwitchToDeepSeek : undefined}
+        />
+      )}
     </section>
   )
 }
 
-function StatusStrip({ health }: { health: Health | null }) {
-  const configured = Boolean(health?.aiConfigured && health?.lowCostModelSelected)
-  const message = !health?.aiConfigured
-    ? '尚未检测到 DEEPSEEK_API_KEY。配置后即可调用 DeepSeek API。'
-    : !health.lowCostModelSelected
-      ? `当前模型 ${health.aiModel} 不在低成本保护列表中，请改为 deepseek-v4-flash。`
-      : `${health.aiProvider || 'DeepSeek'} API Key 已配置，当前低成本模型：${health.aiModel || 'deepseek-v4-flash'}。`
+function AiProviderSelector({
+  health,
+  selectedAiProvider,
+  setSelectedAiProvider,
+  disabled,
+}: {
+  health: Health | null
+  selectedAiProvider: AiProviderId
+  setSelectedAiProvider: (provider: AiProviderId) => void
+  disabled: boolean
+}) {
+  const providers = getAiProviders(health)
+  return (
+    <section className="provider-selector" aria-label="AI 模型选择">
+      <div>
+        <span className="provider-label">AI 模型</span>
+        <p>进入流程后会锁定当前选择，整套识别、出题和反馈都使用同一个模型。</p>
+      </div>
+      <div className="provider-options">
+        {providers.map((provider) => (
+          <button
+            type="button"
+            className={selectedAiProvider === provider.id ? 'active' : ''}
+            disabled={disabled}
+            key={provider.id}
+            onClick={() => setSelectedAiProvider(provider.id)}
+          >
+            <strong>{provider.label}</strong>
+            <span>{provider.model}</span>
+            <small>{provider.configured ? '已配置' : '未配置'}</small>
+          </button>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function StatusStrip({ health, selectedAiProvider }: { health: Health | null; selectedAiProvider: AiProviderId }) {
+  const provider = getAiProviderStatus(health, selectedAiProvider)
+  const configured = Boolean(provider?.configured && provider?.lowCostModelSelected)
+  const message = !health
+    ? '正在检查 AI 服务配置。'
+    : !provider?.configured
+      ? `尚未检测到 ${selectedAiProvider === 'openai' ? 'OPENAI_API_KEY' : 'DEEPSEEK_API_KEY'}。请配置后再使用 ${provider?.label || getAiProviderLabel(health, selectedAiProvider)}。`
+      : !provider.lowCostModelSelected
+        ? `当前模型 ${provider.model} 不在保护列表中，请检查环境变量。`
+        : `${provider.label} 已配置，当前模型：${provider.model}。`
   return (
     <div className={`status-strip ${configured ? 'ready' : 'warning'}`}>
       {configured ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
@@ -610,6 +725,8 @@ function SummaryView({
   health,
   isGenerating,
   error,
+  lockedAiProvider,
+  onSwitchToDeepSeek,
   onGenerate,
   onGenerateOpen,
   onBack,
@@ -636,6 +753,8 @@ function SummaryView({
   health: Health | null
   isGenerating: boolean
   error: string
+  lockedAiProvider: AiProviderId
+  onSwitchToDeepSeek: () => void
   onGenerate: (event: FormEvent) => void
   onGenerateOpen: (event: FormEvent) => void
   onBack: () => void
@@ -856,7 +975,13 @@ function SummaryView({
               </button>
             </form>
           )}
-          {error && <ErrorNotice message={error} />}
+          {error && (
+            <ErrorNotice
+              message={error}
+              actionLabel={lockedAiProvider === 'openai' ? '切换到 DeepSeek 重试' : undefined}
+              onAction={lockedAiProvider === 'openai' ? onSwitchToDeepSeek : undefined}
+            />
+          )}
         </aside>
       </div>
 
@@ -1013,6 +1138,8 @@ function OpenQuestionView({
   setAnswers,
   isReviewing,
   error,
+  lockedAiProvider,
+  onSwitchToDeepSeek,
   onSubmit,
   onBack,
 }: {
@@ -1023,6 +1150,8 @@ function OpenQuestionView({
   setAnswers: (answers: OpenAnswers) => void
   isReviewing: boolean
   error: string
+  lockedAiProvider: AiProviderId
+  onSwitchToDeepSeek: () => void
   onSubmit: () => void
   onBack: () => void
 }) {
@@ -1108,7 +1237,13 @@ function OpenQuestionView({
             </button>
           )}
         </div>
-        {error && <ErrorNotice message={error} />}
+        {error && (
+          <ErrorNotice
+            message={error}
+            actionLabel={lockedAiProvider === 'openai' ? '切换到 DeepSeek 重试' : undefined}
+            onAction={lockedAiProvider === 'openai' ? onSwitchToDeepSeek : undefined}
+          />
+        )}
       </section>
     </section>
   )
@@ -1330,11 +1465,24 @@ function CorrectnessBadge({ correct }: { correct: boolean }) {
   )
 }
 
-function ErrorNotice({ message }: { message: string }) {
+function ErrorNotice({
+  message,
+  actionLabel,
+  onAction,
+}: {
+  message: string
+  actionLabel?: string
+  onAction?: () => void
+}) {
   return (
     <div className="error-notice">
-      <XCircle size={18} />
+      <XCircle size={18} className="notice-icon" />
       <span>{message}</span>
+      {actionLabel && onAction && (
+        <button type="button" onClick={onAction}>
+          {actionLabel}
+        </button>
+      )}
     </div>
   )
 }
@@ -1369,6 +1517,22 @@ function formatAnswerWithText(answer: OptionId[], options: Question['options']) 
     .sort()
     .map((id) => `${id}. ${optionMap.get(id) || '未找到对应选项内容'}`)
     .join('；')
+}
+
+function getAiProviders(health: Health | null) {
+  const providers = health?.aiProviders?.length ? health.aiProviders : fallbackAiProviders
+  return providers.map((provider) => ({
+    ...provider,
+    id: provider.id === 'openai' ? 'openai' : 'deepseek',
+  })) as AiProviderStatus[]
+}
+
+function getAiProviderStatus(health: Health | null, providerId: AiProviderId) {
+  return getAiProviders(health).find((provider) => provider.id === providerId)
+}
+
+function getAiProviderLabel(health: Health | null, providerId: AiProviderId) {
+  return getAiProviderStatus(health, providerId)?.label || (providerId === 'openai' ? 'GPT-5.5' : 'DeepSeek')
 }
 
 function withFeedbackQuestionSet(questionSet: OpenQuestionSet, writingGoal: string): OpenQuestionSet {

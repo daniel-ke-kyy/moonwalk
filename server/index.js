@@ -9,15 +9,13 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { nanoid } from 'nanoid'
 import {
-  analyzeMaterial,
-  generateOpenFeedback,
-  generateOpenQuestions,
-  generateQuiz,
-  getAiModelName,
-  getAiProviderName,
-  hasAiKey,
-  isLowCostModelSelected,
-} from './deepseek.js'
+  DEFAULT_AI_PROVIDER,
+  assertAiProviderReady,
+  getAiProvider,
+  getDefaultAiProviderInfo,
+  listAiProviders,
+  normalizeAiProviderId,
+} from './aiProviders.js'
 import {
   getExtension,
   inspectDocument,
@@ -52,12 +50,16 @@ app.use(cors())
 app.use(express.json({ limit: '2mb' }))
 
 app.get('/api/health', (_req, res) => {
+  const defaultProvider = getDefaultAiProviderInfo()
   res.json({
     ok: true,
-    aiConfigured: hasAiKey(),
-    aiProvider: getAiProviderName(),
-    aiModel: getAiModelName(),
-    lowCostModelSelected: isLowCostModelSelected(),
+    aiConfigured: defaultProvider.configured,
+    aiProvider: defaultProvider.label,
+    aiProviderId: defaultProvider.id,
+    aiModel: defaultProvider.model,
+    lowCostModelSelected: defaultProvider.lowCostModelSelected,
+    defaultAiProvider: DEFAULT_AI_PROVIDER,
+    aiProviders: listAiProviders(),
     limits: {
       allowedExtensions: ALLOWED_EXTENSIONS,
       maxFileSizeMB: Math.round(MAX_FILE_SIZE / 1024 / 1024),
@@ -73,9 +75,8 @@ app.get('/api/health', (_req, res) => {
 
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
-    if (!hasAiKey()) {
-      throw new Error('还没有配置 DEEPSEEK_API_KEY，暂时无法调用 DeepSeek 进行真实识别。')
-    }
+    const aiProvider = getAiProvider(req.body?.aiProvider)
+    assertAiProviderReady(aiProvider)
 
     const file = req.file
     const originalName = normalizeUploadFilename(file?.originalname)
@@ -90,11 +91,12 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       pageCount: inspection.pageCount,
       slideCount: inspection.slideCount,
     }
-    const summary = await analyzeMaterial(prepared, fileInfo)
+    const summary = await aiProvider.module.analyzeMaterial(prepared, fileInfo)
     const sessionId = nanoid()
 
     sessions.set(sessionId, {
       id: sessionId,
+      aiProviderId: aiProvider.id,
       filePath: file.path,
       fileInfo,
       prepared,
@@ -107,6 +109,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
     res.json({
       sessionId,
+      aiProvider: aiProvider.id,
       fileInfo,
       processingNotes: prepared.processingNotes,
       summary,
@@ -121,13 +124,11 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
 app.post('/api/generate', async (req, res) => {
   try {
-    if (!hasAiKey()) {
-      throw new Error('还没有配置 DEEPSEEK_API_KEY，暂时无法调用 DeepSeek 生成题目。')
-    }
-
     const settings = normalizeSettings(req.body)
     const session = getSession(settings.sessionId)
-    const quiz = await generateQuiz(session, settings)
+    const aiProvider = getSessionAiProvider(session, settings.aiProvider)
+    assertAiProviderReady(aiProvider)
+    const quiz = await aiProvider.module.generateQuiz(session, settings)
     session.quiz = quiz
     res.json(quiz)
   } catch (error) {
@@ -137,16 +138,14 @@ app.post('/api/generate', async (req, res) => {
 
 app.post('/api/open/generate', async (req, res) => {
   try {
-    if (!hasAiKey()) {
-      throw new Error('还没有配置 DEEPSEEK_API_KEY，暂时无法调用 DeepSeek 生成开放式问题。')
-    }
-
     const settings = normalizeOpenQuestionSettings(req.body)
     const session = getSession(settings.sessionId)
+    const aiProvider = getSessionAiProvider(session, settings.aiProvider)
+    assertAiProviderReady(aiProvider)
     validateSelectedSections(session, settings.selectedSectionIndexes)
 
-    const openQuestionSet = await generateOpenQuestions(session, settings)
-    const feedbackContext = buildFeedbackContext(session, settings)
+    const openQuestionSet = await aiProvider.module.generateOpenQuestions(session, settings)
+    const feedbackContext = buildFeedbackContext(session, settings, aiProvider.id)
     session.openQuestionSet = {
       ...openQuestionSet,
       writingGoal: settings.writingGoal,
@@ -162,10 +161,6 @@ app.post('/api/open/generate', async (req, res) => {
 
 app.post('/api/open/feedback', async (req, res) => {
   try {
-    if (!hasAiKey()) {
-      throw new Error('还没有配置 DEEPSEEK_API_KEY，暂时无法调用 DeepSeek 生成开放式反馈。')
-    }
-
     const settings = normalizeOpenFeedbackSettings(req.body)
     const session = sessions.get(settings.sessionId)
     const fallback = settings.feedbackContext
@@ -178,7 +173,12 @@ app.post('/api/open/feedback', async (req, res) => {
       throw new Error('还没有生成开放式问题，请先回到摘要页生成问题。')
     }
 
-    const feedback = await generateOpenFeedback(session || fallback, {
+    const aiProvider = session
+      ? getSessionAiProvider(session, settings.aiProvider)
+      : getAiProvider(fallback.aiProvider || settings.aiProvider)
+    assertAiProviderReady(aiProvider)
+
+    const feedback = await aiProvider.module.generateOpenFeedback(session || fallback, {
       writingGoal: questionSet.writingGoal || fallback?.writingGoal,
       questions: questionSet.questions,
       answers: settings.answers,
@@ -232,6 +232,15 @@ function getSession(sessionId) {
   return session
 }
 
+function getSessionAiProvider(session, requestedProviderId) {
+  const normalizedRequested = normalizeAiProviderId(requestedProviderId)
+  const sessionProviderId = session.aiProviderId || DEFAULT_AI_PROVIDER
+  if (requestedProviderId && normalizedRequested !== sessionProviderId) {
+    throw new Error('当前材料已经锁定使用另一种 AI 模型，请回到首页重新上传后再切换模型。')
+  }
+  return getAiProvider(sessionProviderId)
+}
+
 function normalizeSettings(body) {
   const sessionId = String(body.sessionId || '')
   const questionCount = Number(body.questionCount)
@@ -253,6 +262,7 @@ function normalizeSettings(body) {
 
   return {
     sessionId,
+    aiProvider: normalizeAiProviderId(body.aiProvider),
     questionCount,
     difficulty,
     focusOnly: Boolean(body.focusOnly),
@@ -276,6 +286,7 @@ function normalizeOpenQuestionSettings(body) {
 
   return {
     sessionId,
+    aiProvider: normalizeAiProviderId(body.aiProvider),
     questionCount,
     writingGoal,
     selectedSectionIndexes,
@@ -284,6 +295,7 @@ function normalizeOpenQuestionSettings(body) {
 
 function normalizeOpenFeedbackSettings(body) {
   const sessionId = String(body.sessionId || '')
+  const aiProvider = normalizeAiProviderId(body.aiProvider)
   const answers = body.answers && typeof body.answers === 'object'
     ? Object.fromEntries(
         Object.entries(body.answers).map(([key, value]) => [String(key), String(value || '').trim()]),
@@ -292,7 +304,7 @@ function normalizeOpenFeedbackSettings(body) {
   const feedbackContext = normalizeFeedbackContext(body.feedbackContext)
 
   if (!sessionId) throw new Error('缺少材料会话。')
-  return { sessionId, answers, feedbackContext }
+  return { sessionId, aiProvider, answers, feedbackContext }
 }
 
 function validateSelectedSections(session, selectedSectionIndexes) {
@@ -307,8 +319,9 @@ function validateSelectedSections(session, selectedSectionIndexes) {
   }
 }
 
-function buildFeedbackContext(session, settings) {
+function buildFeedbackContext(session, settings, aiProvider) {
   return {
+    aiProvider,
     fileInfo: session.fileInfo,
     prepared: session.prepared,
     summary: session.summary,
@@ -334,6 +347,7 @@ function normalizeFeedbackContext(value) {
       pageCount: fileInfo.pageCount === null ? null : Number(fileInfo.pageCount) || null,
       slideCount: fileInfo.slideCount === null ? null : Number(fileInfo.slideCount) || null,
     },
+    aiProvider: normalizeAiProviderId(value.aiProvider),
     prepared: {
       textContext: String(prepared.textContext || ''),
       processingNotes: Array.isArray(prepared.processingNotes)

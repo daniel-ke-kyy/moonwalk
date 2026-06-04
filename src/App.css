@@ -281,6 +281,7 @@ button {
   font-size: 13px;
 }
 
+.provider-selector,
 .status-strip,
 .error-notice {
   display: flex;
@@ -294,6 +295,66 @@ button {
   font-size: 14px;
 }
 
+.provider-selector {
+  justify-content: space-between;
+  width: min(780px, 100%);
+  margin-top: 20px;
+  color: #744929;
+  background: rgba(255, 250, 244, 0.86);
+  border: 1px solid #efd7bd;
+}
+
+.provider-selector p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.provider-label {
+  display: block;
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.provider-options {
+  display: flex;
+  gap: 8px;
+}
+
+.provider-options button {
+  display: grid;
+  min-width: 136px;
+  padding: 9px 12px;
+  color: #765235;
+  text-align: left;
+  background: #fff9f1;
+  border: 1px solid #efdbc2;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.provider-options button.active {
+  color: #fff;
+  background: #b86232;
+  border-color: #b86232;
+}
+
+.provider-options button:disabled {
+  cursor: not-allowed;
+  opacity: 0.64;
+}
+
+.provider-options span,
+.provider-options small {
+  margin-top: 2px;
+  font-size: 12px;
+}
+
+.provider-options button.active span,
+.provider-options button.active small {
+  color: rgba(255, 255, 255, 0.78);
+}
+
 .status-strip.ready {
   color: #286444;
   background: #effaf2;
@@ -305,6 +366,30 @@ button {
   color: #8a3d22;
   background: #fff1e8;
   border: 1px solid #f0cbb8;
+}
+
+.error-notice {
+  flex-wrap: wrap;
+}
+
+.error-notice .notice-icon {
+  flex: 0 0 auto;
+}
+
+.error-notice span {
+  flex: 1;
+  min-width: 220px;
+}
+
+.error-notice button {
+  min-height: 34px;
+  padding: 0 12px;
+  color: #fff;
+  background: #a84b2d;
+  border: 1px solid #a84b2d;
+  border-radius: 7px;
+  cursor: pointer;
+  font-weight: 800;
 }
 
 .page-heading {
@@ -1063,9 +1148,20 @@ legend {
 	  }
 
 	  .diagnosis-grid,
+	  .provider-selector,
 	  .open-feedback-grid {
 	    grid-template-columns: 1fr;
 	  }
+
+  .provider-selector {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .provider-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 
 	  .side-panel,
 	  .question-nav {
@@ -1126,4 +1222,8 @@ legend {
 	  .quiz-actions button {
 	    flex: 1;
 	  }
+
+  .provider-options {
+    grid-template-columns: 1fr;
+  }
 	}

@@ -1,14 +1,19 @@
 # 智能材料测验网站
 
-上传 PDF、DOCX、PPTX 后，系统会先在本地提取可复制文字，再使用 DeepSeek API 生成中文材料摘要、知识点和选择题测试。第一版不做登录和长期数据库，上传文件与生成结果只保存在当前服务运行期间。
+上传 PDF、DOCX、PPTX 后，系统会先在本地提取可复制文字，再使用用户在首页选择的 AI 生成中文材料摘要、知识点、选择题测试或开放式追问。第一版不做登录和长期数据库，上传文件与生成结果只保存在当前服务运行期间。
 
 完整需求见 [PRODUCT_REQUIREMENTS.md](./PRODUCT_REQUIREMENTS.md)。
 
 ## 重要说明
 
-DeepSeek 官方 API 是按 token 计费，并从充值余额或赠送余额扣除；它不是稳定意义上的永久免费服务。本项目默认使用低成本模型 `deepseek-v4-flash`，并在后端加入低成本模型保护，避免误切到更贵模型。如果你的 DeepSeek 账号有赠送余额，调用会优先消耗赠送余额。
+本项目支持两种 AI：
 
-DeepSeek API 当前是文本 Chat Completion，不支持直接理解 PDF/PPT 文件里的图片、流程图或扫描版文字。本项目会提取 PDF/DOCX/PPTX 中可复制的文字，再交给 DeepSeek 分析。
+- `DeepSeek`：默认模型，使用 `deepseek-v4-flash`，并在后端加入低成本模型保护。
+- `GPT-5.5`：可选高质量模型，使用 OpenAI Responses API。它不是免费模型，需要可用的 OpenAI API Key 和 API 额度。
+
+DeepSeek 官方 API 是按 token 计费，并从充值余额或赠送余额扣除；它不是稳定意义上的永久免费服务。如果你的 DeepSeek 账号有赠送余额，调用会优先消耗赠送余额。
+
+当前版本会提取 PDF/DOCX/PPTX 中可复制的文字，再交给所选 AI 分析；扫描版文字、复杂图示和图片含义识别仍受本地提取能力限制。
 
 ## 本地运行
 
@@ -18,13 +23,18 @@ DeepSeek API 当前是文本 Chat Completion，不支持直接理解 PDF/PPT 文
 cp .env.example .env
 ```
 
-2. 在 `.env` 中填入 DeepSeek API Key：
+2. 在 `.env` 中填入 API Key：
 
 ```bash
 DEEPSEEK_API_KEY=你的 DeepSeek API Key
 DEEPSEEK_MODEL=deepseek-v4-flash
+OPENAI_API_KEY=你的 OpenAI API Key
+OPENAI_MODEL=gpt-5.5
+OPENAI_REASONING_EFFORT=low
 PORT=5174
 ```
+
+如果暂时不使用 GPT-5.5，可以不填 `OPENAI_API_KEY`；首页会显示 GPT-5.5 未配置。
 
 3. 启动前后端：
 
@@ -72,6 +82,9 @@ cloudflared tunnel --url http://localhost:5174
 - Environment:
   - `DEEPSEEK_API_KEY`: 你的 DeepSeek API Key
   - `DEEPSEEK_MODEL`: `deepseek-v4-flash`
+  - `OPENAI_API_KEY`: 你的 OpenAI API Key
+  - `OPENAI_MODEL`: `gpt-5.5`
+  - `OPENAI_REASONING_EFFORT`: `low`
   - `NODE_ENV`: `production`
 
 部署后，Render 提供的公网域名会同时托管页面和 `/api` 接口。
