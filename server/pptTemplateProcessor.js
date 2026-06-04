@@ -155,7 +155,7 @@ async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
       throw new Error(`模板 PDF「${originalName}」共 ${pageCount} 页，超过 100 页限制。`)
     }
     const text = await extractPdfText(file.path).catch(() => '')
-    const rendered = await renderDocumentToPreviews(file.path, renderDir, { prefix: 'page', dpi: 96 })
+    const rendered = await renderDocumentToPreviews(file.path, renderDir, { prefix: 'page', dpi: 96, extension })
     return {
       ...base,
       pageCount,
@@ -172,7 +172,7 @@ async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
     extractPptxText(file.path).catch(() => ''),
     inspectPptxStyle(file.path, assetDir).catch(() => ({ colors: [], assets: [] })),
   ])
-  const rendered = await renderDocumentToPreviews(file.path, renderDir, { prefix: 'slide', dpi: 96 })
+  const rendered = await renderDocumentToPreviews(file.path, renderDir, { prefix: 'slide', dpi: 96, extension })
   return {
     ...base,
     slideCount,
