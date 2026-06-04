@@ -12,7 +12,7 @@ export async function renderDocumentToPreviews(inputPath, outputDir, options = {
   const extension = String(options.extension || path.extname(inputPath)).toLowerCase()
   await mkdir(outputDir, { recursive: true })
   const pdfPath = extension === '.pdf'
-    ? inputPath
+    ? await ensurePdfExtension(inputPath, outputDir)
     : await convertPptxToPdf(inputPath, outputDir)
   const previewPaths = await renderPdfToPngs(pdfPath, outputDir, options)
   return { pdfPath, previewPaths }
@@ -53,16 +53,28 @@ async function ensurePptxExtension(filePath, outputDir) {
   return workingPath
 }
 
+async function ensurePdfExtension(filePath, outputDir) {
+  if (path.extname(filePath).toLowerCase() === '.pdf') return filePath
+  const workingPath = path.join(outputDir, 'source.pdf')
+  await copyFile(filePath, workingPath)
+  return workingPath
+}
+
 export async function renderPdfToPngs(pdfPath, outputDir, options = {}) {
   await mkdir(outputDir, { recursive: true })
   const prefix = path.join(outputDir, options.prefix || 'slide')
-  await execFileAsync('pdftoppm', [
-    '-png',
-    '-r',
-    String(options.dpi || 128),
-    pdfPath,
-    prefix,
-  ], { timeout: renderTimeoutMs })
+  try {
+    await execFileAsync('pdftoppm', [
+      '-png',
+      '-r',
+      String(options.dpi || 128),
+      pdfPath,
+      prefix,
+    ], { timeout: renderTimeoutMs })
+  } catch (error) {
+    const detail = [error.stderr, error.stdout].filter(Boolean).join('\n').trim()
+    throw new Error(detail || 'PDF 预览转换失败，请确认文件不是加密 PDF，且当前环境已安装 pdftoppm。')
+  }
 
   const files = await readdir(outputDir)
   const basename = path.basename(prefix)
