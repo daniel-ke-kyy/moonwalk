@@ -1546,6 +1546,56 @@ legend {
   margin-bottom: 18px;
 }
 
+.ppt-enhancement-strip {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  background: #fff8ef;
+  border: 1px solid #efd7bd;
+  border-radius: 8px;
+}
+
+.ppt-enhancement-strip strong {
+  display: block;
+  margin-top: 4px;
+  color: #71472a;
+  line-height: 1.45;
+}
+
+.ppt-enhancement-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ppt-enhancement-items span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 5px 9px;
+  color: #9a6a43;
+  background: #fffbf6;
+  border: 1px solid #f0ddc9;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.ppt-enhancement-items span.active {
+  color: #2f6b48;
+  background: #f0fbf4;
+  border-color: #c9e8d3;
+}
+
+.ppt-enhancement-items svg {
+  flex: 0 0 auto;
+}
+
+.ppt-enhancement-items b {
+  color: inherit;
+}
+
 .ppt-quality-head {
   display: flex;
   align-items: flex-start;

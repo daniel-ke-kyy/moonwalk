@@ -210,6 +210,60 @@ type PptPlan = {
   slides: PptSlidePlan[]
 }
 
+type PptNarrativePlan = {
+  title: string
+  subtitle: string
+  audience: string
+  coreMessage: string
+  storyline: string[]
+  assumptions: string[]
+  slides: Array<{
+    slideNumber: number
+    role: string
+    layoutIntent: string
+    keyMessage: string
+    contentPriority: 'high' | 'medium' | 'low'
+    suggestedTemplateRole: string
+    visualDirection: string
+    mustSay: string[]
+    supportingPoints: string[]
+    avoid: string[]
+  }>
+}
+
+type PptTemplateDiagnostics = {
+  phase?: 'initial' | 'revision' | string
+  narrativePlanUsed?: boolean
+  templatePageProfileCount?: number
+  capacity?: {
+    totalReplacements: number
+    trimmedReplacements: number
+    removedEmptyReplacements: number
+    slideDiagnostics?: Array<{
+      slideNumber: number
+      sourceSlide: number
+      layout: string
+      narrativeKeyMessage: string
+      replacementCountBefore: number
+      replacementCountAfter: number
+      trimmed: Array<{
+        slot_id: string
+        beforeLength: number
+        afterLength: number
+        limit: number
+      }>
+      removed: string[]
+      density: string
+      capacityLevel: string
+    }>
+  }
+  checkSummary?: {
+    ok: number
+    warn: number
+    error: number
+  }
+}
+
 type PptSessionResponse = {
   sessionId: string
   aiProvider: AiProviderId
@@ -249,6 +303,8 @@ type PptSessionResponse = {
     commentCount: number
     updatedAt: string
   } | null
+  narrativePlan?: PptNarrativePlan | null
+  templateDiagnostics?: PptTemplateDiagnostics | null
   master: {
     originalName: string
     extension: string
@@ -2582,58 +2638,118 @@ function SourceReference({ sourceRef }: { sourceRef: SourceRef }) {
 
 function PptQualityPanel({ session, compact = false }: { session: PptSessionResponse; compact?: boolean }) {
   const quality = session.qualityCheck
-  if (!quality) return null
-  const issueCount = quality.issues.length
+  if (!quality && !session.narrativePlan && !session.templateDiagnostics) return null
+  const issueCount = quality?.issues.length || 0
   const revisedSlides = session.revisionSummary?.revisedSlides || []
 
   return (
     <section className={`panel ppt-quality-panel ${compact ? 'compact' : ''}`}>
-      <div className="ppt-quality-head">
-        <div>
-          <span className="eyebrow">生成质量自检</span>
-          <h2>{quality.summary}</h2>
-        </div>
-        <div className={`quality-score ${quality.passed ? 'passed' : 'warning'}`}>
-          <strong>{quality.score}</strong>
-          <span>{quality.passed ? '通过' : '需注意'}</span>
-        </div>
-      </div>
+      <PptEnhancementStrip session={session} />
 
-      {revisedSlides.length > 0 && (
-        <div className="revision-summary">
-          <RefreshCcw size={16} />
-          <span>
-            本次{session.revisionSummary?.mode === 'partial' ? '局部修改' : '整套修改'}了第 {revisedSlides.join('、')} 页。
-          </span>
-        </div>
-      )}
-
-      {!compact && (
-        <div className="quality-check-grid">
-          {quality.checks.map((check) => (
-            <div className={`quality-check ${check.status}`} key={`${check.label}-${check.detail}`}>
-              <strong>{check.label}</strong>
-              <span>{check.detail}</span>
+      {quality && (
+        <>
+          <div className="ppt-quality-head">
+            <div>
+              <span className="eyebrow">生成质量自检</span>
+              <h2>{quality.summary}</h2>
             </div>
-          ))}
-        </div>
-      )}
+            <div className={`quality-score ${quality.passed ? 'passed' : 'warning'}`}>
+              <strong>{quality.score}</strong>
+              <span>{quality.passed ? '通过' : '需注意'}</span>
+            </div>
+          </div>
 
-      {issueCount > 0 ? (
-        <div className="quality-issues">
-          {quality.issues.slice(0, compact ? 3 : 10).map((issue, index) => (
-            <article className={`quality-issue ${issue.severity}`} key={`${issue.title}-${index}`}>
-              <span>{issue.slideNumber ? `第 ${issue.slideNumber} 页` : '整体'}</span>
-              <strong>{issue.title}</strong>
-              <p>{issue.detail}</p>
-              {issue.suggestion && <small>{issue.suggestion}</small>}
-            </article>
-          ))}
-        </div>
-      ) : (
-        <p className="empty-state">自检没有发现明显高风险问题。</p>
+          {revisedSlides.length > 0 && (
+            <div className="revision-summary">
+              <RefreshCcw size={16} />
+              <span>
+                本次{session.revisionSummary?.mode === 'partial' ? '局部修改' : '整套修改'}了第 {revisedSlides.join('、')} 页。
+              </span>
+            </div>
+          )}
+
+          {!compact && (
+            <div className="quality-check-grid">
+              {quality.checks.map((check) => (
+                <div className={`quality-check ${check.status}`} key={`${check.label}-${check.detail}`}>
+                  <strong>{check.label}</strong>
+                  <span>{check.detail}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {issueCount > 0 ? (
+            <div className="quality-issues">
+              {quality.issues.slice(0, compact ? 3 : 10).map((issue, index) => (
+                <article className={`quality-issue ${issue.severity}`} key={`${issue.title}-${index}`}>
+                  <span>{issue.slideNumber ? `第 ${issue.slideNumber} 页` : '整体'}</span>
+                  <strong>{issue.title}</strong>
+                  <p>{issue.detail}</p>
+                  {issue.suggestion && <small>{issue.suggestion}</small>}
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-state">自检没有发现明显高风险问题。</p>
+          )}
+        </>
       )}
     </section>
+  )
+}
+
+function PptEnhancementStrip({ session }: { session: PptSessionResponse }) {
+  const diagnostics = session.templateDiagnostics
+  const capacity = diagnostics?.capacity
+  const check = diagnostics?.checkSummary || session.output?.templateFill?.checkSummary
+  const items = [
+    {
+      label: '叙事大纲',
+      detail: session.narrativePlan ? `${session.narrativePlan.slides.length} 页策略` : '未启用',
+      active: Boolean(session.narrativePlan),
+    },
+    {
+      label: '模板画像',
+      detail: diagnostics?.templatePageProfileCount ? `${diagnostics.templatePageProfileCount} 页已识别` : '普通生成',
+      active: Boolean(diagnostics?.templatePageProfileCount),
+    },
+    {
+      label: '容量压缩',
+      detail: capacity
+        ? `${capacity.trimmedReplacements} 处收短，${capacity.removedEmptyReplacements} 处清理`
+        : '未触发',
+      active: Boolean(capacity && (capacity.totalReplacements > 0 || capacity.trimmedReplacements > 0)),
+    },
+    {
+      label: '生成自检',
+      detail: check
+        ? `${check.warn} 个警告，${check.error} 个错误`
+        : session.qualityCheck
+          ? '已完成'
+          : '未完成',
+      active: Boolean(check || session.qualityCheck),
+    },
+  ]
+
+  if (!items.some((item) => item.active)) return null
+
+  return (
+    <div className="ppt-enhancement-strip" aria-label="PPT 第二阶段增强状态">
+      <div>
+        <span className="eyebrow">第二阶段增强</span>
+        <strong>{session.narrativePlan?.coreMessage || '已启用更强模板理解与内容规划'}</strong>
+      </div>
+      <div className="ppt-enhancement-items">
+        {items.map((item) => (
+          <span className={item.active ? 'active' : ''} key={item.label}>
+            <CheckCircle2 size={15} />
+            <b>{item.label}</b>
+            {item.detail}
+          </span>
+        ))}
+      </div>
+    </div>
   )
 }
 

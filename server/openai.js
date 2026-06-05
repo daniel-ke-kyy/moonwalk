@@ -6,12 +6,14 @@ import {
   parseJsonResponse,
 } from './deepseek.js'
 import {
+  buildPptNarrativePlanPrompt,
   buildPptPartialRevisionPrompt,
   buildPptPlanPrompt,
   buildPptQualityCheckPrompt,
   buildPptRevisionPrompt,
   buildPptTemplateFillPrompt,
   mergePartialPptPlan,
+  normalizePptNarrativePlan,
   normalizePptPlan,
   normalizePptQualityCheck,
 } from './pptPlan.js'
@@ -274,6 +276,18 @@ export async function generatePptPlan(context) {
   })
 
   return normalizePptPlan(parseJsonResponse(payload, 'GPT-5.5'), context.slideCount, context.fallbackTitle)
+}
+
+export async function generatePptNarrativePlan(context) {
+  const payload = await callOpenAi({
+    temperature: 0.32,
+    maxTokens: Math.max(4096, context.slideCount * 650),
+    instructions:
+      '你是中文 PPT 内容架构师。你只负责先生成内容叙事大纲和页面策略 JSON，不选择模板页，不输出 Markdown。必须只输出有效 JSON。',
+    input: buildPptNarrativePlanPrompt(context),
+  })
+
+  return normalizePptNarrativePlan(parseJsonResponse(payload, 'GPT-5.5'), context.slideCount, context.fallbackTitle)
 }
 
 export async function generatePptTemplateFillPlan(context) {

@@ -1,11 +1,13 @@
 import { emptyMaterialSummary } from './types.js'
 import {
+  buildPptNarrativePlanPrompt,
   buildPptPartialRevisionPrompt,
   buildPptPlanPrompt,
   buildPptQualityCheckPrompt,
   buildPptRevisionPrompt,
   buildPptTemplateFillPrompt,
   mergePartialPptPlan,
+  normalizePptNarrativePlan,
   normalizePptPlan,
   normalizePptQualityCheck,
 } from './pptPlan.js'
@@ -308,6 +310,26 @@ export async function generatePptPlan(context) {
   })
 
   return normalizePptPlan(parseJsonResponse(payload), context.slideCount, context.fallbackTitle)
+}
+
+export async function generatePptNarrativePlan(context) {
+  const payload = await callDeepSeek({
+    temperature: 0.32,
+    maxTokens: Math.max(4096, context.slideCount * 650),
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是中文 PPT 内容架构师。你只负责先生成内容叙事大纲和页面策略 JSON，不选择模板页，不输出 Markdown。必须只输出有效 JSON。',
+      },
+      {
+        role: 'user',
+        content: buildPptNarrativePlanPrompt(context),
+      },
+    ],
+  })
+
+  return normalizePptNarrativePlan(parseJsonResponse(payload), context.slideCount, context.fallbackTitle)
 }
 
 export async function generatePptTemplateFillPlan(context) {

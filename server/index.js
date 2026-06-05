@@ -33,8 +33,10 @@ import {
 } from './pptPlan.js'
 import { getCommandVersion, renderDocumentToPreviews } from './pptRenderer.js'
 import {
+  adaptTemplateFillPlanToCapacity,
   analyzeTemplateFillLibrary,
   applyTemplateFillPlan,
+  buildTemplatePageProfiles,
   checkTemplateFillPlan,
   normalizePptxForRendering,
   pruneSlideLibraryForAi,
@@ -388,7 +390,9 @@ async function analyzePptUploadSession({ aiProvider, files, body, sessionId, ses
     slideCount: null,
     mainTemplateId: templates[0]?.id || null,
     plan: null,
+    narrativePlan: null,
     templateFillPlan: null,
+    templateDiagnostics: null,
     output: null,
     qualityCheck: null,
     revisionSummary: null,
@@ -874,6 +878,8 @@ async function generatePptSessionOutput(session, aiProvider, update = () => {}, 
   assertNotCancelled()
   const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
   const canUseTemplateFill = mainTemplate?.extension === '.pptx' && !session.master
+  session.narrativePlan = null
+  session.templateDiagnostics = null
   if (canUseTemplateFill && typeof aiProvider.module.generatePptTemplateFillPlan === 'function') {
     try {
       assertNotCancelled()
@@ -891,8 +897,16 @@ async function generatePptSessionOutput(session, aiProvider, update = () => {}, 
   }
 
   assertNotCancelled()
+  if (typeof aiProvider.module.generatePptNarrativePlan === 'function' && !session.narrativePlan) {
+    update('正在先理解内容，生成 PPT 叙事大纲和页面策略。')
+    session.narrativePlan = await aiProvider.module.generatePptNarrativePlan(buildPptAiContext(session))
+    assertNotCancelled()
+  }
   update('正在让 AI 规划每页标题、层级和内容结构。')
-  const plan = await aiProvider.module.generatePptPlan(buildPptAiContext(session))
+  const plan = await aiProvider.module.generatePptPlan({
+    ...buildPptAiContext(session),
+    narrativePlan: session.narrativePlan,
+  })
   assertNotCancelled()
   update('AI 已返回页面方案，正在生成 PPTX。')
   await renderPptSessionOutput(session, plan, { engine: 'fallback', update, assertNotCancelled })
@@ -986,18 +1000,41 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   const { library, cacheHit: templateFillLibraryCacheHit } = await loadTemplateFillLibrary(mainTemplate, libraryPath)
   assertNotCancelled()
   const templateFillLibrary = pruneSlideLibraryForAi(library)
+  const templatePageProfiles = buildTemplatePageProfiles(library)
   let fillPlan = options.baseFillPlan ? clonePlain(options.baseFillPlan) : null
   if (fillPlan && options.planOverride) {
     fillPlan = mergeTemplateFillPlanWithPptPlan(fillPlan, options.planOverride, options.targetSlideNumbers)
   } else {
-    update('正在让 AI 生成逐页模板填充方案。')
+    if (typeof aiProvider.module.generatePptNarrativePlan === 'function') {
+      update('正在先理解内容，生成 PPT 叙事大纲和页面策略。')
+      session.narrativePlan = await aiProvider.module.generatePptNarrativePlan({
+        ...buildPptAiContext(session),
+        templatePageProfiles,
+      })
+      assertNotCancelled()
+    } else {
+      session.narrativePlan = null
+    }
+
+    update('正在根据叙事大纲匹配模板页面并生成填充方案。')
     fillPlan = await aiProvider.module.generatePptTemplateFillPlan({
       ...buildPptAiContext(session),
       templateFillLibrary,
       templateFillLibraryRaw: library,
+      templatePageProfiles,
+      narrativePlan: session.narrativePlan,
     })
   }
   assertNotCancelled()
+  const adapted = adaptTemplateFillPlanToCapacity(fillPlan, library, session.narrativePlan)
+  fillPlan = adapted.plan
+  session.templateDiagnostics = {
+    phase: options.baseFillPlan ? 'revision' : 'initial',
+    narrativePlanUsed: Boolean(session.narrativePlan),
+    templatePageProfileCount: templatePageProfiles.length,
+    capacity: adapted.diagnostics,
+  }
+
   const replacementCount = fillPlan.slides.reduce((total, slide) => total + slide.replacements.length, 0)
   if (replacementCount < Math.max(3, Math.ceil(session.slideCount * 1.5))) {
     throw new Error('模板填充计划有效替换内容太少，已回退到普通生成。')
@@ -1008,6 +1045,10 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   update('正在校验填充方案，避免无效占位和明显溢出。')
   const checkReport = await checkTemplateFillPlan(libraryPath, planPath, checkPath)
   const checkSummary = summarizeTemplateFillCheck(checkReport)
+  session.templateDiagnostics = {
+    ...(session.templateDiagnostics || {}),
+    checkSummary,
+  }
   if (checkSummary.error > 0) {
     throw new Error(`模板填充计划存在 ${checkSummary.error} 个错误，无法应用。`)
   }
@@ -1247,6 +1288,7 @@ async function renderPptSessionOutput(session, plan, options = {}) {
   options.assertNotCancelled?.()
   session.plan = plan
   session.templateFillPlan = null
+  session.templateDiagnostics = null
   session.output = {
     versionId,
     engine: options.engine || 'fallback',
@@ -1275,6 +1317,8 @@ async function runPptQualityCheck(session, aiProvider, update = () => {}, assert
         previewCount: session.output?.previewPaths?.length || 0,
         templateFillCheck: session.output?.templateFill?.checkSummary || null,
       },
+      narrativePlan: session.narrativePlan,
+      templateDiagnostics: session.templateDiagnostics,
     })
     assertNotCancelled()
   } catch (error) {
@@ -1335,6 +1379,8 @@ function serializePptSession(session) {
     cacheSummary: session.cacheSummary || null,
     qualityCheck: session.qualityCheck || null,
     revisionSummary: session.revisionSummary || null,
+    narrativePlan: session.narrativePlan || null,
+    templateDiagnostics: session.templateDiagnostics || null,
     master: session.master
       ? {
           originalName: session.master.originalName,
