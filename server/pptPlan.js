@@ -163,6 +163,9 @@ ${JSON.stringify(context.narrativePlan || null, null, 2)}
 模板页画像和适配建议：
 ${JSON.stringify(context.templatePageProfiles || [], null, 2)}
 
+系统推荐的逐页源页面候选（必须优先参考）：
+${JSON.stringify(context.templateSlideMatchPlan || null, null, 2)}
+
 模板页面库：
 ${JSON.stringify(context.templateFillLibrary, null, 2)}
 
@@ -171,7 +174,7 @@ ${buildPptImageGenerationRuleBlock(context)}
 规则：
 1. 必须刚好生成 ${context.slideCount} 页。
 2. 只能使用模板页面库里存在的 source_slide 和 slot_id，不要编造槽位。
-3. source_slide 必须优先匹配 narrativePlan.slides[n].suggestedTemplateRole 和 layoutIntent，不要机械按模板原顺序替换。
+3. source_slide 必须优先使用“系统推荐的逐页源页面候选”里的 preferredSourceSlide；如果不用 preferredSourceSlide，只能从 candidateSourceSlides 里选，并且必须确实更适合本页内容。
 4. 可以重复使用同一个 source_slide，也可以跳过不适合的源页面；输出顺序必须服务内容逻辑。
 5. 第 1 页优先使用 cover_candidate；最后 1 页优先使用 ending_candidate 或总结型页面；中间页面选择最适合表达内容的 content_candidate/toc_candidate/chapter_candidate。
 6. 每个 replacement 的文字必须适合该 slot 的容量。中文尤其要短，标题控制在 4-16 个汉字，标签控制在 2-12 个汉字，正文槽位也尽量用短句。

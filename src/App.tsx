@@ -248,6 +248,17 @@ type PptTemplateDiagnostics = {
   phase?: 'initial' | 'revision' | string
   narrativePlanUsed?: boolean
   templatePageProfileCount?: number
+  templateSlideMatchPlan?: {
+    slideCount: number
+    items?: Array<{
+      slideNumber: number
+      desiredRole: string
+      layoutIntent: string
+      preferredSourceSlide: number
+    }>
+  }
+  templateSlideMatch?: PptTemplateMatchDiagnostics
+  finalTemplateSlideMatch?: PptTemplateMatchDiagnostics
   capacity?: {
     totalReplacements: number
     trimmedReplacements: number
@@ -275,6 +286,13 @@ type PptTemplateDiagnostics = {
     warn: number
     error: number
   }
+}
+
+type PptTemplateMatchDiagnostics = {
+  slideCount: number
+  remapped: number
+  highRisk: number
+  mediumRisk: number
 }
 
 type PptSessionResponse = {
@@ -2784,6 +2802,8 @@ function PptEnhancementStrip({ session }: { session: PptSessionResponse }) {
   const diagnostics = session.templateDiagnostics
   const capacity = diagnostics?.capacity
   const check = diagnostics?.checkSummary || session.output?.templateFill?.checkSummary
+  const match = diagnostics?.templateSlideMatch || diagnostics?.finalTemplateSlideMatch
+  const matchSlideCount = diagnostics?.finalTemplateSlideMatch?.slideCount || match?.slideCount || 0
   const items = [
     {
       label: '叙事大纲',
@@ -2794,6 +2814,15 @@ function PptEnhancementStrip({ session }: { session: PptSessionResponse }) {
       label: '模板画像',
       detail: diagnostics?.templatePageProfileCount ? `${diagnostics.templatePageProfileCount} 页已识别` : '普通生成',
       active: Boolean(diagnostics?.templatePageProfileCount),
+    },
+    {
+      label: '页型匹配',
+      detail: match
+        ? match.remapped > 0
+          ? `自动校正 ${match.remapped} 页`
+          : `${matchSlideCount} 页已匹配`
+        : '未启用',
+      active: Boolean(match),
     },
     {
       label: '容量压缩',

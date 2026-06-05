@@ -35,14 +35,18 @@ import { getCommandVersion, renderDocumentToPreviews } from './pptRenderer.js'
 import {
   adaptTemplateFillPlanToCapacity,
   analyzeTemplateFillLibrary,
+  alignTemplateFillPlanToMatchPlan,
   applyTemplateFillPlan,
   buildStructuredSourceDeck,
   buildTemplatePageProfiles,
+  buildTemplateSlideMatchPlan,
   checkTemplateFillPlan,
+  diagnoseTemplateFillPlanMatches,
   embedGeneratedImagesInPptx,
   normalizePptxForRendering,
   pruneSlideLibraryForAi,
   summarizeTemplateFillCheck,
+  summarizeTemplateSlideMatchPlan,
   templateFillPlanToPptPlan,
   writeTemplateFillPlan,
 } from './pptTemplateFill.js'
@@ -1110,6 +1114,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
     templateFillSourceRole: options.sourceRole || 'template',
     structuredPagePlan: options.structured ? session.structuredPagePlan : null,
   }
+  let templateSlideMatchPlan = null
   let fillPlan = options.baseFillPlan ? clonePlain(options.baseFillPlan) : null
   if (fillPlan && options.planOverride) {
     fillPlan = mergeTemplateFillPlanWithPptPlan(fillPlan, options.planOverride, options.targetSlideNumbers)
@@ -1125,25 +1130,48 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
       session.narrativePlan = null
     }
 
+    update('正在为每一页计算更合适的模板页候选。')
+    templateSlideMatchPlan = buildTemplateSlideMatchPlan({
+      library,
+      narrativePlan: session.narrativePlan,
+      expectedCount: session.slideCount,
+      structuredPagePlan: templateFillContext.structuredPagePlan,
+    })
+    assertNotCancelled()
     update('正在根据叙事大纲匹配模板页面并生成填充方案。')
     fillPlan = await aiProvider.module.generatePptTemplateFillPlan({
       ...templateFillContext,
       templateFillLibrary,
       templateFillLibraryRaw: library,
       templatePageProfiles,
+      templateSlideMatchPlan: summarizeTemplateSlideMatchPlan(templateSlideMatchPlan),
       narrativePlan: session.narrativePlan,
     })
   }
   assertNotCancelled()
+  if (!templateSlideMatchPlan) {
+    templateSlideMatchPlan = buildTemplateSlideMatchPlan({
+      library,
+      narrativePlan: session.narrativePlan,
+      expectedCount: session.slideCount,
+      structuredPagePlan: templateFillContext.structuredPagePlan,
+    })
+  }
   if (options.structured) {
     fillPlan = alignStructuredFillPlan(fillPlan, library, session.structuredPagePlan, session.narrativePlan, session.aiProviderId)
   }
+  const matched = alignTemplateFillPlanToMatchPlan(fillPlan, library, templateSlideMatchPlan, {
+    enforce: !options.baseFillPlan,
+  })
+  fillPlan = matched.plan
   let adapted = adaptTemplateFillPlanToCapacity(fillPlan, library, session.narrativePlan)
   fillPlan = adapted.plan
   session.templateDiagnostics = {
     phase: options.baseFillPlan ? 'revision' : 'initial',
     narrativePlanUsed: Boolean(session.narrativePlan),
     templatePageProfileCount: templatePageProfiles.length,
+    templateSlideMatchPlan: summarizeTemplateSlideMatchPlan(templateSlideMatchPlan),
+    templateSlideMatch: matched.diagnostics,
     capacity: adapted.diagnostics,
   }
 
@@ -1182,6 +1210,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
       templateFillLibrary,
       templateFillLibraryRaw: library,
       templatePageProfiles,
+      templateSlideMatchPlan: summarizeTemplateSlideMatchPlan(templateSlideMatchPlan),
       narrativePlan: session.narrativePlan,
       repairMode: true,
       previousFillPlan: fillPlan,
@@ -1191,11 +1220,16 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
     if (options.structured) {
       fillPlan = alignStructuredFillPlan(fillPlan, library, session.structuredPagePlan, session.narrativePlan, session.aiProviderId)
     }
+    const repairedMatch = alignTemplateFillPlanToMatchPlan(fillPlan, library, templateSlideMatchPlan, {
+      enforce: true,
+    })
+    fillPlan = repairedMatch.plan
     adapted = adaptTemplateFillPlanToCapacity(fillPlan, library, session.narrativePlan)
     fillPlan = adapted.plan
     session.templateDiagnostics = {
       ...(session.templateDiagnostics || {}),
       repair: repairInfo,
+      templateSlideMatch: repairedMatch.diagnostics,
       capacity: adapted.diagnostics,
     }
     if (countTemplateFillEdits(fillPlan) < minimumReplacements) {
@@ -1215,6 +1249,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
     ...(session.templateDiagnostics || {}),
     repair: repairInfo,
     checkSummary,
+    finalTemplateSlideMatch: diagnoseTemplateFillPlanMatches(fillPlan, library, templateSlideMatchPlan),
   }
   if (checkSummary.error > 0) {
     throw new Error(`模板填充计划存在 ${checkSummary.error} 个错误，无法应用。`)
