@@ -46,6 +46,24 @@ ${JSON.stringify(context.templateFillCheckSummary || null, null, 2)}
 `
 }
 
+function buildPptImageGenerationRuleBlock(context) {
+  const limit = Math.max(0, Math.min(5, Number(context.maxGeneratedImages || 5)))
+  if (!context.imageGenerationEnabled || limit <= 0) {
+    return `
+图片能力：
+- 当前 AI 不生成真实图片。不要输出 kind 为 image_placeholder 的 extra_shapes；如果需要视觉辅助，用原生表格、图表、文字层级或简单形状表达。
+`
+  }
+  return `
+图片能力：
+- 当前选择 GPT-5.5，服务端会根据 extra_shapes 里的 image_placeholder.image_prompt 生成真实配图并嵌入 PPTX。
+- 整套 PPT 最多允许 ${limit} 张真实图片；最多输出 ${limit} 个有效 image_placeholder，超过的会被忽略。
+- 你不能在 JSON 里输出图片数据、URL 或 Markdown 图片，只能写清楚 image_prompt。
+- 只在内容页使用 image_placeholder；封面、目录、章节标题页、结尾页不要新增图片占位。
+- image_prompt 必须具体描述画面主体、构图、风格、色调和用途，且要贴合当前模板；不要要求图片中出现可读文字、汉字、logo、水印、截图界面或复杂表格。
+`
+}
+
 export function buildPptNarrativePlanPrompt(context) {
   return `请先为这份 PPT 生成中文“内容叙事大纲 + 页面策略”，并只返回 JSON。
 
@@ -148,6 +166,8 @@ ${JSON.stringify(context.templatePageProfiles || [], null, 2)}
 模板页面库：
 ${JSON.stringify(context.templateFillLibrary, null, 2)}
 
+${buildPptImageGenerationRuleBlock(context)}
+
 规则：
 1. 必须刚好生成 ${context.slideCount} 页。
 2. 只能使用模板页面库里存在的 source_slide 和 slot_id，不要编造槽位。
@@ -158,14 +178,14 @@ ${JSON.stringify(context.templateFillLibrary, null, 2)}
 7. contentPriority 为 high 的页面也不能堆字，宁可表达更锋利；low 页面必须克制留白。
 8. 不要填满所有槽位。只替换真正需要承载内容的槽位；页码、装饰性极短数字、品牌标语如果不确定可以保留原样。
 9. notes 写演讲者备注，2-4 句自然中文，不要复制页面文字。
-10. 默认不要生成图片，不要要求新增页面元素；只有五类母版模式的内容页可以通过 extra_shapes 添加少量透明可编辑文本框或图片占位建议。
+10. 默认不要新增页面元素；只有内容页可以通过 extra_shapes 添加少量透明可编辑文本框。图片占位只在上方“图片能力”允许时使用。
 11. 如内容不足，合理补全结构，但不要声称来自用户材料。
 12. layout 只能从 cover、agenda、section、content、two_column、comparison、timeline、quote、summary 中选择。
 13. 如果源文件是母版 PPTX：保留 logo、页眉页脚、页码、装饰线、背景、数字编号、红色侧栏等固定视觉元素；优先替换 XXXXX、占位标题、占位正文、示例项目名等明显示例文字。
 14. 如果源文件是母版 PPTX：不要把“目录”“01”“02”“03”“04”这类结构性文字随意改掉，除非它本身就是该页唯一需要表达的新内容。
 15. 如果提供 structuredPagePlan：第 n 页的 source_slide 必须等于 structuredPagePlan.slides[n-1].sourceSlide，layout 必须等于 structuredPagePlan.slides[n-1].layout。
 16. 五类母版模式下，封面、目录、标题页、结尾页只替换原有文本槽位；内容页可以使用 extra_shapes 添加少量可编辑元素，但新增文本框必须透明，不得覆盖母版结构。
-17. DeepSeek 不生成真实图片；GPT-5.5 当前只允许输出 image_placeholder 作为图片占位/建议，不生成真实图片。
+17. 如果输出 image_placeholder，必须同时填写 image_prompt；text 只写很短的占位说明即可。
 18. 如果模板页面库的某页包含 tables，且本页内容是对比、清单、指标、步骤等结构化信息，优先使用 table_edits 修改原生表格，而不是把表格内容塞进普通文本框。
 19. table_edits 只能使用模板页面库里该 source_slide 已存在的 table_id；只能修改已有 cell 的 row/col/text，不能增删行列，row 和 col 都从 0 开始。
 20. 如果模板页面库的某页包含 charts，且本页内容包含趋势、占比、对比、增长等数字关系，优先使用 chart_edits 修改原生图表数据。
@@ -214,6 +234,15 @@ JSON 格式：
           "text": "透明可编辑补充文字",
           "fill_transparency": 100,
           "line_transparency": 100
+        },
+        {
+          "kind": "image_placeholder",
+          "x": 0.58,
+          "y": 0.24,
+          "width": 0.32,
+          "height": 0.34,
+          "text": "配图占位",
+          "image_prompt": "一张贴合本页论点的抽象视觉辅助图，暖色浅背景，简洁构图，无文字无水印"
         }
       ]
     }
@@ -267,7 +296,7 @@ ${JSON.stringify(context.templates, null, 2)}
 输出要求：
 1. 统一使用中文。
 2. 必须刚好生成 ${context.slideCount} 页。
-3. 不要要求生成真实新图片。DeepSeek 不写图片占位，GPT-5.5 可在五类母版内容页使用图片占位/图片建议。
+3. 这个页面计划阶段不要要求生成真实新图片；如选择 GPT-5.5，真实配图只由后续模板填充阶段通过 image_placeholder.image_prompt 触发。
 4. 每页 bullets 建议 2-5 条，每条尽量短，适合放在 PPT 上。
 5. speakerNotes 可写给演讲者看的补充说明，不要太长。
 6. layout 只能从 cover、agenda、section、content、two_column、comparison、timeline、quote、summary 中选择。

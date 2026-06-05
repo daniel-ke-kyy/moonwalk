@@ -39,6 +39,7 @@ import {
   buildStructuredSourceDeck,
   buildTemplatePageProfiles,
   checkTemplateFillPlan,
+  embedGeneratedImagesInPptx,
   normalizePptxForRendering,
   pruneSlideLibraryForAi,
   summarizeTemplateFillCheck,
@@ -89,6 +90,10 @@ const pptTemplateFillLibraryCache = new Map()
 const maxPptTemplateFillLibraryCacheEntries = 20
 const maxPptTemplateFillLibraryDiskEntries = 80
 const pptCacheTtlMs = Number(process.env.PPT_CACHE_TTL_MS || 6 * 60 * 60 * 1000)
+const configuredGeneratedPptImageLimit = Number(process.env.PPT_MAX_GENERATED_IMAGES || 5)
+const maxGeneratedPptImages = Number.isFinite(configuredGeneratedPptImageLimit)
+  ? Math.max(0, Math.min(5, configuredGeneratedPptImageLimit))
+  : 5
 const accessPassword = String(process.env.ACCESS_PASSWORD || '').trim()
 const accessAuthEnabled = Boolean(accessPassword)
 const accessCookieName = 'moonwalk_access'
@@ -941,6 +946,7 @@ function buildPptAiContext(session) {
     templates: buildTemplateContext(session.templates),
     visualContext,
     imageGenerationEnabled: session.aiProviderId === 'openai',
+    maxGeneratedImages: maxGeneratedPptImages,
   }
 }
 
@@ -1220,8 +1226,21 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   assertNotCancelled()
   update('正在应用填充方案生成 PPTX。')
   const rawGeneratedPptxPath = await applyTemplateFillPlan(mainTemplate.path, planPath, pptxPath)
-  const generatedPptxPath = await normalizePptxForRendering(rawGeneratedPptxPath)
+  const imageEnhancement = await maybeGeneratePptImages({
+    session,
+    aiProvider,
+    fillPlan,
+    pptxPath: rawGeneratedPptxPath,
+    outputDir,
+    update,
+    assertNotCancelled,
+  })
+  const generatedPptxPath = await normalizePptxForRendering(imageEnhancement.pptxPath || rawGeneratedPptxPath)
   assertNotCancelled()
+  session.templateDiagnostics = {
+    ...(session.templateDiagnostics || {}),
+    images: imageEnhancement.summary,
+  }
   const plan = templateFillPlanToPptPlan(fillPlan, mainTemplate.originalName || 'Moonwalk PPT')
   let pdfPath = null
   let previewPaths = []
@@ -1265,8 +1284,174 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
       libraryPath,
       planPath,
       checkPath,
+      images: imageEnhancement.summary,
     },
   }
+}
+
+async function maybeGeneratePptImages({
+  session,
+  aiProvider,
+  fillPlan,
+  pptxPath,
+  outputDir,
+  update = () => {},
+  assertNotCancelled = () => {},
+}) {
+  const summary = {
+    enabled: false,
+    provider: aiProvider?.id || session.aiProviderId || '',
+    limit: maxGeneratedPptImages,
+    requested: 0,
+    attempted: 0,
+    generated: 0,
+    embedded: 0,
+    failed: 0,
+    status: 'skipped',
+    skippedReason: '',
+    failures: [],
+  }
+
+  if (session.aiProviderId !== 'openai' || aiProvider?.id !== 'openai') {
+    summary.skippedReason = 'provider_not_openai'
+    return { pptxPath, summary }
+  }
+  if (maxGeneratedPptImages <= 0) {
+    summary.skippedReason = 'limit_zero'
+    return { pptxPath, summary }
+  }
+  if (typeof aiProvider.module.generatePptImage !== 'function') {
+    summary.skippedReason = 'provider_missing_image_generation'
+    return { pptxPath, summary }
+  }
+
+  const requests = collectPptImageGenerationRequests(session, fillPlan, maxGeneratedPptImages)
+  summary.requested = requests.length
+  if (!requests.length) {
+    summary.skippedReason = 'no_image_placeholders'
+    return { pptxPath, summary }
+  }
+
+  summary.enabled = true
+  summary.status = 'running'
+  const imageDir = path.join(outputDir, 'generated-images')
+  await mkdir(imageDir, { recursive: true })
+  const placements = []
+
+  update(`正在生成 PPT 真实配图（最多 ${maxGeneratedPptImages} 张）。`)
+  for (const [index, request] of requests.entries()) {
+    assertNotCancelled()
+    summary.attempted += 1
+    const outputPath = path.join(
+      imageDir,
+      `slide-${String(request.slideNumber).padStart(2, '0')}-image-${String(index + 1).padStart(2, '0')}.png`,
+    )
+    try {
+      update(`正在生成第 ${index + 1}/${requests.length} 张 PPT 配图。`)
+      await aiProvider.module.generatePptImage({
+        prompt: request.prompt,
+        outputPath,
+      })
+      placements.push({
+        slideNumber: request.slideNumber,
+        imagePath: outputPath,
+        x: request.x,
+        y: request.y,
+        width: request.width,
+        height: request.height,
+      })
+      summary.generated += 1
+    } catch (error) {
+      summary.failed += 1
+      summary.failures.push({
+        slideNumber: request.slideNumber,
+        reason: trimInlineText(toUserError(error), 220),
+      })
+      console.warn(`第 ${request.slideNumber} 页 PPT 配图生成失败：${toUserError(error)}`)
+    }
+  }
+
+  if (!placements.length) {
+    summary.status = 'generation_failed'
+    return { pptxPath, summary }
+  }
+
+  assertNotCancelled()
+  const enhancedPptxPath = path.join(outputDir, 'moonwalk-template-filled-with-images.pptx')
+  try {
+    update('正在把真实配图嵌入 PPTX。')
+    const outputPath = await embedGeneratedImagesInPptx(pptxPath, placements, enhancedPptxPath)
+    summary.embedded = placements.length
+    summary.status = summary.failed > 0 ? 'partial' : 'ready'
+    return { pptxPath: outputPath, summary }
+  } catch (error) {
+    summary.status = 'embed_failed'
+    summary.failures.push({
+      slideNumber: null,
+      reason: trimInlineText(toUserError(error), 260),
+    })
+    console.warn(`PPT 真实配图嵌入失败，继续使用未嵌图版本：${toUserError(error)}`)
+    return { pptxPath, summary }
+  }
+}
+
+function collectPptImageGenerationRequests(session, fillPlan, limit) {
+  const requests = []
+  const slides = Array.isArray(fillPlan?.slides) ? fillPlan.slides : []
+  for (const [slideIndex, slide] of slides.entries()) {
+    if (requests.length >= limit) break
+    const extraShapes = Array.isArray(slide?.extra_shapes) ? slide.extra_shapes : []
+    for (const [shapeIndex, shape] of extraShapes.entries()) {
+      if (requests.length >= limit) break
+      if (String(shape?.kind || '') !== 'image_placeholder') continue
+      const imagePrompt = normalizePptImagePromptSeed(shape)
+      if (!imagePrompt) continue
+      requests.push({
+        slideNumber: slideIndex + 1,
+        shapeIndex,
+        x: clampUnit(shape.x, 0.08),
+        y: clampUnit(shape.y, 0.18),
+        width: Math.max(0.02, clampUnit(shape.width, 0.32)),
+        height: Math.max(0.02, clampUnit(shape.height, 0.16)),
+        prompt: buildPptImageGenerationPrompt({
+          session,
+          slide,
+          shape,
+          slideNumber: slideIndex + 1,
+          imagePrompt,
+        }),
+      })
+    }
+  }
+  return requests
+}
+
+function normalizePptImagePromptSeed(shape) {
+  const text = String(shape?.image_prompt || shape?.prompt || shape?.text || '').replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  if (/^(图片占位|图片建议|image placeholder|image suggestion)$/i.test(text)) return ''
+  return trimInlineText(text, 360)
+}
+
+function buildPptImageGenerationPrompt({ session, slide, shape, slideNumber, imagePrompt }) {
+  const replacementTexts = Array.isArray(slide?.replacements)
+    ? slide.replacements.map((replacement) => replacement?.text).filter(Boolean)
+    : []
+  return [
+    `整套 PPT 标题：${trimInlineText(session.narrativePlan?.title || session.plan?.title || session.pptType || '中文演示文稿', 80)}`,
+    `页面位置：第 ${slideNumber} 页，页面用途 ${slide?.purpose || slide?.layout || 'content'}。`,
+    `页面已有文字：${trimInlineText(replacementTexts.join('；') || slide?.notes || '无', 320)}`,
+    `用户制作需求：${trimInlineText(session.requirements || '保持模板风格，清晰、克制、适合中文演示。', 260)}`,
+    `图片具体需求：${imagePrompt}`,
+    `占位区域比例：x=${shape.x}，y=${shape.y}，width=${shape.width}，height=${shape.height}。`,
+    '生成一张视觉辅助图片，风格要贴合模板和页面语气；不要包含可读文字、汉字、logo、水印、边框、截图界面或复杂表格。',
+  ].join('\n')
+}
+
+function clampUnit(value, fallback) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return Math.max(0, Math.min(1, number))
 }
 
 async function getTemplateFillSource(session, mainTemplate, update = () => {}) {

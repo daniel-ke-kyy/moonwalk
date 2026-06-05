@@ -5,7 +5,8 @@ import {
   normalizeSummary,
   parseJsonResponse,
 } from './deepseek.js'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import path from 'node:path'
 import {
   buildPptNarrativePlanPrompt,
   buildPptPartialRevisionPrompt,
@@ -360,6 +361,50 @@ export async function checkPptQuality(context) {
   return normalizePptQualityCheck(parseJsonResponse(payload, 'GPT-5.5'), context.plan)
 }
 
+export async function generatePptImage({ prompt, outputPath }) {
+  if (!hasAiKey()) {
+    throw new Error('还没有配置 OPENAI_API_KEY。请先配置 OpenAI API Key。')
+  }
+  const safePrompt = String(prompt || '').trim()
+  if (!safePrompt) throw new Error('缺少图片生成提示词。')
+
+  const body = {
+    model: modelName,
+    input: [
+      '请为中文 PPT 生成一张可直接放入幻灯片的图片。',
+      '要求：无水印、无边框、不要生成可读文字或复杂中文字，画面干净，适合作为 16:9 演示文稿中的插图。',
+      `图片需求：${safePrompt}`,
+    ].join('\n'),
+    tools: [
+      {
+        type: 'image_generation',
+        size: '1024x1024',
+        action: 'generate',
+      },
+    ],
+    tool_choice: { type: 'image_generation' },
+  }
+  const json = await sendOpenAiRequest(body).catch((error) => {
+    if (!isImageGenerationToolOptionsFallbackError(error)) throw error
+    return sendOpenAiRequest({
+      ...body,
+      tools: [{ type: 'image_generation' }],
+      tool_choice: undefined,
+    })
+  })
+
+  const imageData = extractImageGenerationResult(json)
+  if (!imageData) {
+    throw new Error('GPT-5.5 图片生成没有返回可用图片。')
+  }
+  await mkdir(path.dirname(outputPath), { recursive: true })
+  await writeImageResult(outputPath, imageData)
+  return {
+    outputPath,
+    model: modelName,
+  }
+}
+
 async function callOpenAi({ instructions, input, temperature, maxTokens, visualContext = null, tools = null }) {
   if (!hasAiKey()) {
     throw new Error('还没有配置 OPENAI_API_KEY。请先配置 OpenAI API Key，或切换到 DeepSeek 重试。')
@@ -436,6 +481,45 @@ function extractResponseText(json) {
   return chunks.join('\n').trim()
 }
 
+function extractImageGenerationResult(json) {
+  const output = Array.isArray(json?.output) ? json.output : []
+  for (const item of output) {
+    if (item?.type === 'image_generation_call') {
+      const result = item.result || item.image || item.data
+      if (typeof result === 'string' && result.trim()) return normalizeImageData(result)
+    }
+    const content = Array.isArray(item?.content) ? item.content : []
+    for (const part of content) {
+      const result = part?.result || part?.image || part?.data || part?.image_url
+      if (typeof result === 'string' && result.trim()) return normalizeImageData(result)
+    }
+  }
+  const direct = json?.result || json?.image || json?.url || json?.data?.[0]?.b64_json || json?.data?.[0]?.url
+  return typeof direct === 'string' && direct.trim() ? normalizeImageData(direct) : ''
+}
+
+function normalizeImageData(value) {
+  const text = String(value || '').trim()
+  if (!text.startsWith('data:')) return text
+  return text.split(',').at(-1) || ''
+}
+
+async function writeImageResult(outputPath, imageData) {
+  const data = String(imageData || '').trim()
+  if (/^https?:\/\//i.test(data)) {
+    const response = await fetch(data)
+    if (!response.ok) {
+      throw new Error(`图片下载失败：HTTP ${response.status}`)
+    }
+    await writeFile(outputPath, Buffer.from(await response.arrayBuffer()))
+    return
+  }
+  if (!/^[A-Za-z0-9+/=\s_-]+$/.test(data) || data.length < 80) {
+    throw new Error('GPT-5.5 图片生成返回了无法识别的图片数据。')
+  }
+  await writeFile(outputPath, data.replace(/\s+/g, ''), 'base64')
+}
+
 async function buildOpenAiInput(text, visualContext) {
   const pages = (visualContext?.pages || []).slice(0, maxVisualPages)
   if (!pages.length) return text
@@ -483,6 +567,12 @@ function isVisualInputFallbackError(error) {
   const message = String(error?.rawMessage || error?.message || '')
   return Boolean(error?.status === 400 || error?.status === 415 || error?.status === 422 || error?.status === 503)
     || /input_image|image|vision|multimodal|供应商暂时不可用|暂时不可用|unsupported/i.test(message)
+}
+
+function isImageGenerationToolOptionsFallbackError(error) {
+  const message = String(error?.rawMessage || error?.message || '')
+  return Boolean(error?.status === 400 || error?.status === 422)
+    && /tool_choice|action|size|unknown parameter|unsupported|invalid/i.test(message)
 }
 
 function appendVisualFallbackNote(text, visualContext, reason) {

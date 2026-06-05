@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import AdmZip from 'adm-zip'
 import path from 'node:path'
+import posixPath from 'node:path/posix'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
@@ -34,6 +36,268 @@ export async function applyTemplateFillPlan(pptxPath, planPath, outputPath) {
   await mkdir(path.dirname(outputPath), { recursive: true })
   const result = await runTemplateFillCommand(['apply', pptxPath, planPath, '-o', outputPath])
   return findAppliedPptxPath(outputPath, result.stderr)
+}
+
+export async function embedGeneratedImagesInPptx(pptxPath, placements, outputPath) {
+  await mkdir(path.dirname(outputPath), { recursive: true })
+  const manifestPath = outputPath.replace(/\.pptx$/i, '.images.json')
+  await writeFile(manifestPath, `${JSON.stringify(placements || [], null, 2)}\n`, 'utf8')
+  try {
+    const zip = new AdmZip(pptxPath)
+    const slideParts = resolveSlideParts(zip)
+    const canvas = readPresentationCanvas(zip)
+    const normalizedPlacements = normalizeImagePlacements(placements)
+    let mediaNumber = getNextMediaNumber(zip)
+    let embeddedCount = 0
+
+    for (const placement of normalizedPlacements) {
+      const slidePart = slideParts[placement.slideNumber - 1]
+      if (!slidePart) continue
+      const imageBuffer = await readFile(placement.imagePath).catch(() => null)
+      if (!imageBuffer) continue
+
+      const imageExtension = normalizeImageExtension(placement.imagePath)
+      const imagePart = `ppt/media/moonwalk_generated_image_${mediaNumber}.${imageExtension}`
+      mediaNumber += 1
+      zip.addFile(imagePart, imageBuffer)
+      ensureDefaultContentType(zip, imageExtension)
+
+      const relsPart = relsPathForPart(slidePart)
+      const relsXml = getZipText(zip, relsPart) || defaultRelationshipsXml()
+      const relId = nextRelationshipId(relsXml)
+      setZipText(zip, relsPart, appendRelationship(
+        relsXml,
+        relId,
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image',
+        posixPath.relative(posixPath.dirname(slidePart), imagePart),
+      ))
+
+      const slideXml = getZipText(zip, slidePart)
+      if (!slideXml) continue
+      const geometry = placementToEmu(placement, canvas)
+      const shapeId = nextShapeId(slideXml)
+      const pictureXml = buildPictureXml({
+        relId,
+        shapeId,
+        name: `Moonwalk Generated Image ${embeddedCount + 1}`,
+        ...geometry,
+      })
+      setZipText(zip, slidePart, appendShapeToSlide(slideXml, pictureXml))
+      embeddedCount += 1
+    }
+
+    if (embeddedCount === 0) {
+      throw new Error('没有可嵌入的生成图片。')
+    }
+    zip.writeZip(outputPath)
+    return outputPath
+  } catch (error) {
+    const detail = [error.stderr, error.stdout, error.message].filter(Boolean).join('\n').trim()
+    throw new Error(detail || '生成图片插入 PPTX 失败。')
+  }
+}
+
+function resolveSlideParts(zip) {
+  const presentationXml = getZipText(zip, 'ppt/presentation.xml')
+  const presentationRelsXml = getZipText(zip, 'ppt/_rels/presentation.xml.rels')
+  const relationshipLookup = new Map()
+  if (presentationRelsXml) {
+    for (const tag of presentationRelsXml.matchAll(/<Relationship\b[^>]*>/g)) {
+      const attrs = parseXmlAttributes(tag[0])
+      if (!String(attrs.Type || '').endsWith('/slide') || !attrs.Id || !attrs.Target) continue
+      relationshipLookup.set(attrs.Id, normalizePptxPartPath(attrs.Target, 'ppt/presentation.xml'))
+    }
+  }
+
+  if (presentationXml && relationshipLookup.size) {
+    const parts = []
+    for (const tag of presentationXml.matchAll(/<p:sldId\b[^>]*>/g)) {
+      const attrs = parseXmlAttributes(tag[0])
+      const relId = attrs['r:id'] || attrs.id
+      const part = relationshipLookup.get(relId)
+      if (part) parts.push(part)
+    }
+    if (parts.length) return parts
+  }
+
+  return zip.getEntries()
+    .map((entry) => entry.entryName)
+    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+    .sort((left, right) => Number(left.match(/slide(\d+)\.xml/i)?.[1] || 0) - Number(right.match(/slide(\d+)\.xml/i)?.[1] || 0))
+}
+
+function readPresentationCanvas(zip) {
+  const xml = getZipText(zip, 'ppt/presentation.xml') || ''
+  const match = xml.match(/<p:sldSz\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"/)
+  const width = Number(match?.[1])
+  const height = Number(match?.[2])
+  return {
+    width: Number.isFinite(width) && width > 0 ? width : Math.round(13.333333 * 914400),
+    height: Number.isFinite(height) && height > 0 ? height : Math.round(7.5 * 914400),
+  }
+}
+
+function normalizeImagePlacements(placements) {
+  if (!Array.isArray(placements)) return []
+  return placements
+    .map((placement) => {
+      const slideNumber = Number(placement?.slideNumber)
+      const x = normalizeUnit(placement?.x, 0.08)
+      const y = normalizeUnit(placement?.y, 0.18)
+      let width = Math.max(0.02, normalizeUnit(placement?.width, 0.32))
+      let height = Math.max(0.02, normalizeUnit(placement?.height, 0.16))
+      if (x + width > 1) width = Math.max(0.02, 1 - x)
+      if (y + height > 1) height = Math.max(0.02, 1 - y)
+      return {
+        slideNumber,
+        imagePath: String(placement?.imagePath || ''),
+        x,
+        y,
+        width,
+        height,
+      }
+    })
+    .filter((placement) => Number.isInteger(placement.slideNumber) && placement.slideNumber > 0 && placement.imagePath)
+}
+
+function normalizeImageExtension(filePath) {
+  const extension = path.extname(String(filePath || '')).replace('.', '').toLowerCase()
+  if (extension === 'jpeg') return 'jpg'
+  return ['png', 'jpg', 'gif'].includes(extension) ? extension : 'png'
+}
+
+function getNextMediaNumber(zip) {
+  const used = new Set(zip.getEntries().map((entry) => entry.entryName))
+  let number = 1
+  while (used.has(`ppt/media/moonwalk_generated_image_${number}.png`)
+    || used.has(`ppt/media/moonwalk_generated_image_${number}.jpg`)
+    || used.has(`ppt/media/moonwalk_generated_image_${number}.gif`)) {
+    number += 1
+  }
+  return number
+}
+
+function ensureDefaultContentType(zip, extension) {
+  const contentTypeByExtension = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    gif: 'image/gif',
+  }
+  const contentType = contentTypeByExtension[extension] || 'image/png'
+  const contentTypesPath = '[Content_Types].xml'
+  const xml = getZipText(zip, contentTypesPath)
+  if (!xml || xml.includes(`Extension="${extension}"`)) return
+  const defaultXml = `<Default Extension="${escapeXmlAttribute(extension)}" ContentType="${escapeXmlAttribute(contentType)}"/>`
+  setZipText(zip, contentTypesPath, xml.replace('</Types>', `${defaultXml}</Types>`))
+}
+
+function relsPathForPart(partName) {
+  return posixPath.join(posixPath.dirname(partName), '_rels', `${posixPath.basename(partName)}.rels`)
+}
+
+function defaultRelationshipsXml() {
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>'
+}
+
+function nextRelationshipId(relsXml) {
+  let maxId = 0
+  for (const match of String(relsXml || '').matchAll(/\bId="rId(\d+)"/g)) {
+    maxId = Math.max(maxId, Number(match[1]) || 0)
+  }
+  return `rId${maxId + 1}`
+}
+
+function appendRelationship(relsXml, relId, type, target) {
+  const relationship = `<Relationship Id="${escapeXmlAttribute(relId)}" Type="${escapeXmlAttribute(type)}" Target="${escapeXmlAttribute(target)}"/>`
+  return String(relsXml || defaultRelationshipsXml()).replace('</Relationships>', `${relationship}</Relationships>`)
+}
+
+function placementToEmu(placement, canvas) {
+  return {
+    x: Math.round(canvas.width * placement.x),
+    y: Math.round(canvas.height * placement.y),
+    cx: Math.round(canvas.width * placement.width),
+    cy: Math.round(canvas.height * placement.height),
+  }
+}
+
+function nextShapeId(slideXml) {
+  let maxId = 1
+  for (const match of String(slideXml || '').matchAll(/<[^<:\s>]*:?cNvPr\b[^>]*\bid="(\d+)"/g)) {
+    maxId = Math.max(maxId, Number(match[1]) || 0)
+  }
+  return maxId + 1
+}
+
+function buildPictureXml({ relId, shapeId, name, x, y, cx, cy }) {
+  return [
+    '<p:pic>',
+    '<p:nvPicPr>',
+    `<p:cNvPr id="${shapeId}" name="${escapeXmlAttribute(name)}"/>`,
+    '<p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr>',
+    '<p:nvPr/>',
+    '</p:nvPicPr>',
+    '<p:blipFill>',
+    `<a:blip r:embed="${escapeXmlAttribute(relId)}"/>`,
+    '<a:stretch><a:fillRect/></a:stretch>',
+    '</p:blipFill>',
+    '<p:spPr>',
+    '<a:xfrm>',
+    `<a:off x="${x}" y="${y}"/>`,
+    `<a:ext cx="${cx}" cy="${cy}"/>`,
+    '</a:xfrm>',
+    '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>',
+    '</p:spPr>',
+    '</p:pic>',
+  ].join('')
+}
+
+function appendShapeToSlide(slideXml, shapeXml) {
+  const withNamespaces = ensureSlideRelationshipNamespace(slideXml)
+  if (!withNamespaces.includes('</p:spTree>')) {
+    throw new Error('PPTX 页面缺少可插入图片的 spTree。')
+  }
+  return withNamespaces.replace('</p:spTree>', `${shapeXml}</p:spTree>`)
+}
+
+function ensureSlideRelationshipNamespace(slideXml) {
+  if (/\sxmlns:r=/.test(slideXml)) return slideXml
+  return slideXml.replace(
+    /<p:sld\b/,
+    '<p:sld xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"',
+  )
+}
+
+function normalizePptxPartPath(target, basePart) {
+  if (String(target || '').startsWith('/')) return String(target).replace(/^\/+/, '')
+  return posixPath.normalize(posixPath.join(posixPath.dirname(basePart), String(target || ''))).replace(/^\/+/, '')
+}
+
+function parseXmlAttributes(tag) {
+  const attrs = {}
+  for (const match of String(tag || '').matchAll(/([A-Za-z_][\w:.-]*)="([^"]*)"/g)) {
+    attrs[match[1]] = match[2]
+  }
+  return attrs
+}
+
+function getZipText(zip, entryName) {
+  const entry = zip.getEntry(entryName)
+  return entry ? entry.getData().toString('utf8') : ''
+}
+
+function setZipText(zip, entryName, text) {
+  const data = Buffer.from(String(text || ''), 'utf8')
+  if (zip.getEntry(entryName)) zip.updateFile(entryName, data)
+  else zip.addFile(entryName, data)
+}
+
+function escapeXmlAttribute(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
 }
 
 export async function buildStructuredSourceDeck(manifest, outputPath) {
@@ -256,6 +520,7 @@ function normalizeExtraShapes(value) {
         width: normalizeUnit(shape?.width, 0.32),
         height: normalizeUnit(shape?.height, 0.16),
         text: trimText(String(shape?.text || ''), 180),
+        image_prompt: trimText(String(shape?.image_prompt || shape?.prompt || ''), 360),
         fill_color: normalizeHex(shape?.fill_color, kind === 'image_placeholder' ? 'F6EFE7' : 'FFF7EE'),
         line_color: normalizeHex(shape?.line_color, 'DCAE80'),
         font_color: normalizeHex(shape?.font_color, '71472A'),
