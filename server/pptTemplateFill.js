@@ -91,6 +91,8 @@ export function pruneSlideLibraryForAi(library, maxSlides = 60) {
       slots: normalizeSlotsForAi(slide.slots),
       table_count: Array.isArray(slide.tables) ? slide.tables.length : 0,
       chart_count: Array.isArray(slide.charts) ? slide.charts.length : 0,
+      tables: normalizeTablesForAi(slide.tables),
+      charts: normalizeChartsForAi(slide.charts),
     })),
   }
 }
@@ -199,6 +201,8 @@ export function normalizeTemplateFillPlan(value, library, expectedCount) {
   const slides = Array.isArray(value?.slides) ? value.slides : []
   const availableSlides = new Set((library?.slides || []).map((slide) => Number(slide.slide_index)))
   const slotIdsBySlide = buildSlotLookup(library)
+  const tableLookup = buildTableLookup(library)
+  const chartLookup = buildChartLookup(library)
   const normalizedSlides = slides.slice(0, expectedCount).map((slide, index) => {
     const requestedSource = Number(slide?.source_slide)
     const sourceSlide = availableSlides.has(requestedSource)
@@ -222,8 +226,8 @@ export function normalizeTemplateFillPlan(value, library, expectedCount) {
       notes: String(slide?.notes || slide?.speakerNotes || ''),
       transition: 'keep',
       replacements,
-      table_edits: Array.isArray(slide?.table_edits) ? slide.table_edits : [],
-      chart_edits: Array.isArray(slide?.chart_edits) ? slide.chart_edits : [],
+      table_edits: normalizeTableEdits(slide?.table_edits, tableLookup.get(sourceSlide)),
+      chart_edits: normalizeChartEdits(slide?.chart_edits, chartLookup.get(sourceSlide)),
       extra_shapes: normalizeExtraShapes(slide?.extra_shapes),
     }
   })
@@ -262,6 +266,155 @@ function normalizeExtraShapes(value) {
     })
     .filter((shape) => shape.width > 0.02 && shape.height > 0.02)
     .slice(0, 4)
+}
+
+function normalizeTablesForAi(tables) {
+  if (!Array.isArray(tables)) return []
+  return tables.slice(0, 4).map((table) => {
+    const rowCount = Number(table?.row_count) || 0
+    const columnCount = Number(table?.column_count) || 0
+    const sampleCells = []
+    for (const row of table?.rows || []) {
+      for (const cell of row?.cells || []) {
+        if (sampleCells.length >= 18) break
+        sampleCells.push({
+          row: Number(cell?.row) || 0,
+          col: Number(cell?.col) || 0,
+          text: trimText(cell?.text, 60),
+        })
+      }
+      if (sampleCells.length >= 18) break
+    }
+    return {
+      table_id: String(table?.table_id || ''),
+      row_count: rowCount,
+      column_count: columnCount,
+      sample_cells: sampleCells,
+    }
+  }).filter((table) => table.table_id && table.row_count > 0 && table.column_count > 0)
+}
+
+function normalizeChartsForAi(charts) {
+  if (!Array.isArray(charts)) return []
+  return charts.slice(0, 4).map((chart) => ({
+    chart_id: String(chart?.chart_id || ''),
+    chart_type: String(chart?.chart_type || ''),
+    category_count: Number(chart?.category_count) || 0,
+    series_count: Number(chart?.series_count) || 0,
+    categories: normalizeStringArray(chart?.categories).slice(0, 10),
+    series: Array.isArray(chart?.series)
+      ? chart.series.slice(0, 4).map((series) => ({
+          name: trimText(series?.name, 40),
+          values: normalizeNumberArray(series?.values).slice(0, 10),
+        }))
+      : [],
+  })).filter((chart) => chart.chart_id)
+}
+
+function normalizeTableEdits(value, tablesById = new Map()) {
+  if (!Array.isArray(value) || !(tablesById instanceof Map)) return []
+  return value
+    .map((edit) => {
+      const tableId = String(edit?.table_id || '').trim()
+      const table = tablesById.get(tableId)
+      if (!table) return null
+      const rowCount = Number(table.row_count) || 0
+      const columnCount = Number(table.column_count) || 0
+      const cells = Array.isArray(edit?.cells)
+        ? edit.cells
+            .map((cell) => ({
+              row: Number(cell?.row),
+              col: Number(cell?.col),
+              text: trimText(cell?.text, 160),
+            }))
+            .filter((cell) => (
+              Number.isInteger(cell.row)
+              && Number.isInteger(cell.col)
+              && cell.row >= 0
+              && cell.col >= 0
+              && cell.row < rowCount
+              && cell.col < columnCount
+              && cell.text
+            ))
+            .slice(0, 36)
+        : []
+      if (!cells.length) return null
+      return {
+        table_id: tableId,
+        cells,
+        optional: Boolean(edit?.optional),
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 4)
+}
+
+function normalizeChartEdits(value, chartsById = new Map()) {
+  if (!Array.isArray(value) || !(chartsById instanceof Map)) return []
+  return value
+    .map((edit) => {
+      const chartId = String(edit?.chart_id || '').trim()
+      if (!chartsById.has(chartId)) return null
+      const categories = normalizeStringArray(edit?.categories).slice(0, 12)
+      const series = Array.isArray(edit?.series)
+        ? edit.series
+            .map((item, index) => ({
+              name: trimText(item?.name || `系列${index + 1}`, 40),
+              values: normalizeNumberArray(item?.values).slice(0, 12),
+            }))
+            .filter((item) => item.name && item.values.length === categories.length)
+            .slice(0, 4)
+        : []
+      if (!categories.length || !series.length) return null
+      return {
+        chart_id: chartId,
+        categories,
+        series,
+        optional: Boolean(edit?.optional),
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 4)
+}
+
+function buildTableLookup(library) {
+  const lookup = new Map()
+  for (const slide of library?.slides || []) {
+    const slideIndex = Number(slide.slide_index)
+    const tablesById = new Map()
+    for (const table of slide.tables || []) {
+      const tableId = String(table?.table_id || '').trim()
+      if (tableId) tablesById.set(tableId, table)
+    }
+    lookup.set(slideIndex, tablesById)
+  }
+  return lookup
+}
+
+function buildChartLookup(library) {
+  const lookup = new Map()
+  for (const slide of library?.slides || []) {
+    const slideIndex = Number(slide.slide_index)
+    const chartsById = new Map()
+    for (const chart of slide.charts || []) {
+      const chartId = String(chart?.chart_id || '').trim()
+      if (chartId) chartsById.set(chartId, chart)
+    }
+    lookup.set(slideIndex, chartsById)
+  }
+  return lookup
+}
+
+function normalizeStringArray(value) {
+  if (!Array.isArray(value)) return []
+  return value.map((item) => trimText(item, 60)).filter(Boolean)
+}
+
+function normalizeNumberArray(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item))
 }
 
 function normalizeUnit(value, fallback) {

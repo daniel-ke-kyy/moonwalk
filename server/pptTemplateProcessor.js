@@ -188,23 +188,34 @@ export function buildMasterContext(master, description) {
   }
 }
 
-export function buildStructuredMasterContext(structuredMasters, description) {
+export function buildStructuredMasterContext(structuredMasters, description, options = {}) {
   const items = STRUCTURED_MASTER_ROLES.map((role) => {
     const master = structuredMasters?.[role.key] || null
+    const roleSource = options.roleSources?.[role.key] || null
+    const source = master ? 'uploaded-master' : roleSource?.source || 'generated-fallback'
     return {
       role: role.key,
       label: role.label,
       uploaded: Boolean(master),
-      originalName: master?.originalName || '',
+      source,
+      originalName: master?.originalName || roleSource?.originalName || '',
+      templateName: roleSource?.templateName || '',
+      slide: roleSource?.slide || null,
       textSample: master?.textSample || '',
       detectedColors: master?.detectedColors || [],
       imageCount: master?.assets?.length || 0,
     }
   })
-  if (!items.some((item) => item.uploaded) && !description) return null
+  const uploadedCount = items.filter((item) => item.uploaded).length
+  const templateFallbackCount = items.filter((item) => item.source === 'template-fallback').length
+  const generatedFallbackCount = items.filter((item) => item.source === 'generated-fallback').length
+  if (!options.force && !uploadedCount && !description) return null
   return {
-    enabled: items.some((item) => item.uploaded),
+    enabled: true,
     description: description || '',
+    uploadedCount,
+    templateFallbackCount,
+    generatedFallbackCount,
     roles: items,
   }
 }

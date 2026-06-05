@@ -13,7 +13,9 @@ function buildStructuredModeBlock(context) {
 - 每个章节前必须有标题页；内容章节数由系统计划给出。
 - structuredPagePlan 已经固定每页 role、layout 和 sourceSlide；不要自行改变页型顺序。
 - sourceSlide 固定映射：封面=1，目录=2，标题页=3，内容页=4，结尾=5。
-- 如果某一类母版未上传，系统会从主模板中抽取可编辑页面兜底；仍然要按对应页型使用。
+- 如果某一类母版未上传，系统会优先从用户上传模板中挑选相近的可编辑源页；没有合适模板页时才生成该页型的可编辑兜底页。无论来源如何，仍然要按对应页型使用。
+- 如果五类母版全部未上传，也必须生成封面、目录、章节标题页、内容页、结尾页这五个逻辑板块，并尽量贴合模板文件风格。
+- 五类母版信息里的 source=uploaded-master 表示用户上传母版，必须原位替换/清空可编辑文本；source=template-fallback 表示从用户模板中挑出的可编辑页，必须继承这页结构和风格；source=generated-fallback 表示系统生成的可编辑兜底源页，可以直接填充内容并保持模板风格。
 - 不要把目录页当内容页，不要把内容页当目录页，不要把标题页当正文页。
 - 用户母版补充说明优先于母版本身，母版优先于模板，模板优先于 AI 自行发挥。
 
@@ -22,6 +24,25 @@ ${JSON.stringify(context.structuredPagePlan, null, 2)}
 
 五类母版信息：
 ${JSON.stringify(context.structuredMasters || null, null, 2)}
+`
+}
+
+function buildTemplateFillRepairBlock(context) {
+  if (!context.repairMode) return ''
+  return `
+这是模板填充计划的自动修正任务。上一版 fill_plan 已经通过 check-plan 检查，发现了错误或过多警告；你必须在保留页数、source_slide、页面角色和内容逻辑的前提下修正。
+
+上一版 fill_plan：
+${JSON.stringify(context.previousFillPlan || null, null, 2)}
+
+check-plan 摘要：
+${JSON.stringify(context.templateFillCheckSummary || null, null, 2)}
+
+修正要求：
+- ERROR 必须全部修掉：不要使用不存在的 slot_id、table_id、chart_id，不要写越界表格单元格，不要让图表 series.values 数量和 categories 数量不一致。
+- WARN 要尽量减少：缩短过长标题/正文，把长段落改成短句或删掉低价值替换。
+- 不要新增页面、删除页面、调换页面顺序；如果提供 structuredPagePlan，source_slide 和 layout 仍必须逐页严格匹配。
+- 如果某个槽位反复导致溢出，宁可不替换它，也不要塞满。
 `
 }
 
@@ -96,8 +117,9 @@ ${context.templateFillSourceRole === 'master'
   ? '\n重要：当前源文件是用户上传的“幻灯片母版 PPTX”。你必须把它当成可编辑母版直接修改，只替换母版页面中原有示例文字，不允许把母版当背景图，也不允许新增白色文本框、色块、遮罩或任何新页面元素。'
   : ''}
 ${context.templateFillSourceRole === 'structured-master'
-  ? '\n重要：当前源文件是五类母版组合成的可编辑 PPTX。第 1 页封面、第 2 页目录、第 3 页标题页、第 4 页内容页、第 5 页结尾页。你必须直接替换这些 PPTX 页里的可编辑文本槽位，不能把母版当背景图，不能新增白色文本框、色块或遮罩。'
+  ? '\n重要：当前源文件是五类页型组合成的可编辑 PPTX。第 1 页封面、第 2 页目录、第 3 页标题页、第 4 页内容页、第 5 页结尾页。用户上传的页型必须直接替换原 PPTX 页里的可编辑文本槽位；系统生成的缺失页型也是真实可编辑 PPTX 页，不是背景图。任何情况下都不能把母版当背景图，不能新增白色文本框、色块或遮罩。'
   : ''}
+${buildTemplateFillRepairBlock(context)}
 
 生成目标：
 - PPT 类型：${context.pptType}
@@ -144,6 +166,11 @@ ${JSON.stringify(context.templateFillLibrary, null, 2)}
 15. 如果提供 structuredPagePlan：第 n 页的 source_slide 必须等于 structuredPagePlan.slides[n-1].sourceSlide，layout 必须等于 structuredPagePlan.slides[n-1].layout。
 16. 五类母版模式下，封面、目录、标题页、结尾页只替换原有文本槽位；内容页可以使用 extra_shapes 添加少量可编辑元素，但新增文本框必须透明，不得覆盖母版结构。
 17. DeepSeek 不生成真实图片；GPT-5.5 当前只允许输出 image_placeholder 作为图片占位/建议，不生成真实图片。
+18. 如果模板页面库的某页包含 tables，且本页内容是对比、清单、指标、步骤等结构化信息，优先使用 table_edits 修改原生表格，而不是把表格内容塞进普通文本框。
+19. table_edits 只能使用模板页面库里该 source_slide 已存在的 table_id；只能修改已有 cell 的 row/col/text，不能增删行列，row 和 col 都从 0 开始。
+20. 如果模板页面库的某页包含 charts，且本页内容包含趋势、占比、对比、增长等数字关系，优先使用 chart_edits 修改原生图表数据。
+21. chart_edits 只能使用模板页面库里该 source_slide 已存在的 chart_id；必须提供 categories 和 series，且每个 series.values 的数量必须等于 categories 数量，values 必须是数字。
+22. 不要编造 table_id、chart_id、slot_id；宁可少改，也不要写不存在的目标。
 
 JSON 格式：
 {
@@ -159,8 +186,24 @@ JSON 格式：
       "replacements": [
         {"slot_id": "s01_sh2", "text": "新标题"}
       ],
-      "table_edits": [],
-      "chart_edits": [],
+      "table_edits": [
+        {
+          "table_id": "s01_tbl3",
+          "cells": [
+            {"row": 0, "col": 0, "text": "指标"},
+            {"row": 0, "col": 1, "text": "结论"}
+          ]
+        }
+      ],
+      "chart_edits": [
+        {
+          "chart_id": "s01_ch4",
+          "categories": ["第一阶段", "第二阶段"],
+          "series": [
+            {"name": "完成度", "values": [42, 68]}
+          ]
+        }
+      ],
       "extra_shapes": [
         {
           "kind": "text",

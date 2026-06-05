@@ -45,6 +45,7 @@ import {
   templateFillPlanToPptPlan,
   writeTemplateFillPlan,
 } from './pptTemplateFill.js'
+import { createStructuredFallbackRolePptx } from './structuredFallbackPptx.js'
 import {
   analyzeMasterFile,
   analyzeStructuredMasterFiles,
@@ -410,6 +411,8 @@ async function analyzePptUploadSession({ aiProvider, files, body, sessionId, ses
     contentSlideCount: null,
     structuredPagePlan: null,
     structuredTemplateFillSource: null,
+    structuredFallbackRoleSources: null,
+    structuredRoleSources: null,
     mainTemplateId: templates[0]?.id || null,
     plan: null,
     narrativePlan: null,
@@ -871,9 +874,7 @@ function applyPptSettings(session, settings) {
   session.mode = settings.mode
   session.pptType = settings.pptType
   session.contentSlideCount = settings.slideCount
-  session.structuredPagePlan = hasStructuredMasters(session.structuredMasters)
-    ? buildStructuredPagePlan(settings.slideCount)
-    : null
+  session.structuredPagePlan = buildStructuredPagePlan(settings.slideCount)
   session.slideCount = session.structuredPagePlan?.totalSlides || settings.slideCount
   session.contentText = settings.contentText
   session.requirements = settings.requirements
@@ -899,7 +900,10 @@ function buildPptAiContext(session) {
     contentFileText: session.contentFileText,
     requirements: session.requirements,
     master: buildMasterContext(session.master, session.masterDescription),
-    structuredMasters: buildStructuredMasterContext(session.structuredMasters, session.masterDescription),
+    structuredMasters: buildStructuredMasterContext(session.structuredMasters, session.masterDescription, {
+      force: Boolean(session.structuredPagePlan),
+      roleSources: session.structuredRoleSources,
+    }),
     structuredPagePlan: session.structuredPagePlan || null,
     templates: buildTemplateContext(session.templates),
   }
@@ -931,7 +935,7 @@ async function generatePptSessionOutput(session, aiProvider, update = () => {}, 
       if (templateFillSource.role === 'master') {
         throw new Error(`母版直接编辑失败：${toUserError(error)}。请确认母版 PPTX 中包含可编辑文本框，而不是整页截图。`)
       }
-      if (templateFillSource.role === 'structured-master') {
+      if (templateFillSource.role === 'structured-master' && hasUploadedStructuredMasters(session)) {
         throw new Error(`五类母版直接编辑失败：${toUserError(error)}。请确认上传的母版是可编辑单页 PPTX，而不是整页截图。`)
       }
       console.warn(`PPT Master template-fill 失败，回退到原生成器：${toUserError(error)}`)
@@ -1027,7 +1031,7 @@ async function renderRevisedPptSessionOutput(session, aiProvider, plan, slideCom
       if (templateFillSource.role === 'master') {
         throw new Error(`母版直接修改失败：${toUserError(error)}。请确认母版 PPTX 中包含可编辑文本框。`)
       }
-      if (templateFillSource.role === 'structured-master') {
+      if (templateFillSource.role === 'structured-master' && hasUploadedStructuredMasters(session)) {
         throw new Error(`五类母版直接修改失败：${toUserError(error)}。请确认上传的角色母版是可编辑单页 PPTX。`)
       }
       console.warn(`PPT 局部模板填充修改失败，回退到普通渲染：${toUserError(error)}`)
@@ -1093,7 +1097,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   if (options.structured) {
     fillPlan = alignStructuredFillPlan(fillPlan, library, session.structuredPagePlan, session.narrativePlan, session.aiProviderId)
   }
-  const adapted = adaptTemplateFillPlanToCapacity(fillPlan, library, session.narrativePlan)
+  let adapted = adaptTemplateFillPlanToCapacity(fillPlan, library, session.narrativePlan)
   fillPlan = adapted.plan
   session.templateDiagnostics = {
     phase: options.baseFillPlan ? 'revision' : 'initial',
@@ -1102,21 +1106,73 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
     capacity: adapted.diagnostics,
   }
 
-  const replacementCount = fillPlan.slides.reduce((total, slide) => total + slide.replacements.length, 0)
   const minimumReplacements = options.structured
     ? Math.max(3, Math.ceil((session.contentSlideCount || session.slideCount) * 1.1))
     : Math.max(3, Math.ceil(session.slideCount * 1.5))
-  if (replacementCount < minimumReplacements) {
+  if (countTemplateFillEdits(fillPlan) < minimumReplacements) {
     throw new Error('模板填充计划有效替换内容太少，已回退到普通生成。')
   }
   await writeTemplateFillPlan(planPath, fillPlan)
 
   assertNotCancelled()
   update('正在校验填充方案，避免无效占位和明显溢出。')
-  const checkReport = await checkTemplateFillPlan(libraryPath, planPath, checkPath)
-  const checkSummary = summarizeTemplateFillCheck(checkReport)
+  let checkReport = await checkTemplateFillPlan(libraryPath, planPath, checkPath)
+  let checkSummary = summarizeTemplateFillCheck(checkReport)
+  let repairInfo = {
+    attempted: false,
+    initialCheckSummary: null,
+    finalCheckSummary: null,
+  }
+  const shouldRepair = shouldRepairTemplateFillPlan(checkSummary, session)
+  const canRepair = shouldRepair
+    && !options.baseFillPlan
+    && !options.planOverride
+    && typeof aiProvider.module.generatePptTemplateFillPlan === 'function'
+  if (canRepair) {
+    repairInfo = {
+      attempted: true,
+      initialCheckSummary: checkSummary,
+      finalCheckSummary: null,
+    }
+    assertNotCancelled()
+    update('填充方案检查发现问题，正在自动修正一次。')
+    fillPlan = await aiProvider.module.generatePptTemplateFillPlan({
+      ...templateFillContext,
+      templateFillLibrary,
+      templateFillLibraryRaw: library,
+      templatePageProfiles,
+      narrativePlan: session.narrativePlan,
+      repairMode: true,
+      previousFillPlan: fillPlan,
+      templateFillCheckSummary: checkSummary,
+    })
+    assertNotCancelled()
+    if (options.structured) {
+      fillPlan = alignStructuredFillPlan(fillPlan, library, session.structuredPagePlan, session.narrativePlan, session.aiProviderId)
+    }
+    adapted = adaptTemplateFillPlanToCapacity(fillPlan, library, session.narrativePlan)
+    fillPlan = adapted.plan
+    session.templateDiagnostics = {
+      ...(session.templateDiagnostics || {}),
+      repair: repairInfo,
+      capacity: adapted.diagnostics,
+    }
+    if (countTemplateFillEdits(fillPlan) < minimumReplacements) {
+      throw new Error('自动修正后的模板填充计划有效替换内容太少，已回退到普通生成。')
+    }
+    await writeTemplateFillPlan(planPath, fillPlan)
+    assertNotCancelled()
+    update('正在复核修正后的填充方案。')
+    checkReport = await checkTemplateFillPlan(libraryPath, planPath, checkPath)
+    checkSummary = summarizeTemplateFillCheck(checkReport)
+    repairInfo = {
+      ...repairInfo,
+      finalCheckSummary: checkSummary,
+    }
+  }
   session.templateDiagnostics = {
     ...(session.templateDiagnostics || {}),
+    repair: repairInfo,
     checkSummary,
   }
   if (checkSummary.error > 0) {
@@ -1179,7 +1235,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
 }
 
 async function getTemplateFillSource(session, mainTemplate, update = () => {}) {
-  if (hasStructuredMasters(session.structuredMasters)) {
+  if (session.structuredPagePlan) {
     const template = await ensureStructuredTemplateFillSource(session, mainTemplate, update)
     return { template, role: 'structured-master', structured: true }
   }
@@ -1198,34 +1254,76 @@ async function ensureStructuredTemplateFillSource(session, mainTemplate, update 
     return session.structuredTemplateFillSource
   }
 
-  const allRolesUploaded = STRUCTURED_MASTER_ROLES.every((role) => session.structuredMasters?.[role.key])
-  if (!allRolesUploaded && mainTemplate?.extension !== '.pptx') {
-    throw new Error('五类母版只上传了部分页型时，缺失页型需要一个 PPTX 主模板作为可编辑来源；请改选 PPTX 主模板，或上传完整五类母版。')
-  }
-
-  update('正在把五类母版和缺失页型模板合成为可编辑源 PPTX。')
+  update('正在把已上传母版和缺失页型的可编辑页面合成为源 PPTX。')
   const outputDir = path.join(session.sessionDir, 'structured-source')
   const outputPath = path.join(outputDir, 'moonwalk-structured-source.pptx')
+  const roleSources = {}
+  for (const role of STRUCTURED_MASTER_ROLES) {
+    const master = session.structuredMasters?.[role.key]
+    if (master) {
+      roleSources[role.key] = {
+        source: 'uploaded-master',
+        label: role.label,
+        originalName: master.originalName,
+        path: master.path,
+        slide: 1,
+      }
+      continue
+    }
+
+    const templateSource = selectTemplateRoleSource(session, role)
+    if (templateSource) {
+      roleSources[role.key] = templateSource
+      continue
+    }
+
+    const generated = await ensureStructuredFallbackRoleSource(session, role)
+    roleSources[role.key] = {
+      source: 'generated-fallback',
+      label: role.label,
+      originalName: generated.label,
+      path: generated.path,
+      slide: 1,
+    }
+  }
   const manifest = {
     sources: STRUCTURED_MASTER_ROLES.map((role) => {
-      const master = session.structuredMasters?.[role.key]
+      const source = roleSources[role.key]
       return {
         id: role.key,
         role: role.key,
         label: role.label,
-        pptx: master?.path || mainTemplate.path,
-        slide: master ? 1 : selectFallbackTemplateSlideForRole(mainTemplate, role.key),
+        source: source.source,
+        pptx: source.path,
+        slide: source.slide,
       }
     }),
   }
   await buildStructuredSourceDeck(manifest, outputPath)
+  session.structuredRoleSources = Object.fromEntries(
+    Object.entries(roleSources).map(([roleKey, source]) => [roleKey, {
+      source: source.source,
+      label: source.label,
+      originalName: source.originalName || '',
+      templateName: source.templateName || '',
+      slide: source.slide,
+    }]),
+  )
 
   const roleNames = STRUCTURED_MASTER_ROLES
-    .filter((role) => session.structuredMasters?.[role.key])
+    .filter((role) => roleSources[role.key]?.source === 'uploaded-master')
+    .map((role) => role.label)
+  const templateRoleNames = STRUCTURED_MASTER_ROLES
+    .filter((role) => roleSources[role.key]?.source === 'template-fallback')
+    .map((role) => role.label)
+  const generatedRoleNames = STRUCTURED_MASTER_ROLES
+    .filter((role) => roleSources[role.key]?.source === 'generated-fallback')
     .map((role) => role.label)
   session.structuredTemplateFillSource = {
     id: 'structured_masters',
-    originalName: roleNames.length ? `五类母版组合源（${roleNames.join('、')}）` : '五类母版组合源',
+    originalName: roleNames.length
+      ? `五类母版组合源（上传：${roleNames.join('、')}；模板：${templateRoleNames.join('、') || '无'}；生成：${generatedRoleNames.join('、') || '无'}）`
+      : `五类母版组合源（模板：${templateRoleNames.join('、') || '无'}；生成：${generatedRoleNames.join('、') || '无'}）`,
     extension: '.pptx',
     size: 0,
     path: outputPath,
@@ -1239,8 +1337,33 @@ async function ensureStructuredTemplateFillSource(session, mainTemplate, update 
     slideTexts: [],
     cacheKey,
     cacheHit: false,
+    generatedFallbackRoles: generatedRoleNames,
   }
   return session.structuredTemplateFillSource
+}
+
+async function ensureStructuredFallbackRoleSource(session, role) {
+  const cacheKey = buildStructuredFallbackRoleCacheKey(session, role)
+  const cached = session.structuredFallbackRoleSources?.[role.key]
+  if (cached?.cacheKey === cacheKey && existsSync(cached.path)) return cached
+
+  const outputDir = path.join(session.sessionDir, 'structured-source', 'fallback-roles')
+  const outputPath = path.join(outputDir, `${role.key}.pptx`)
+  await createStructuredFallbackRolePptx({
+    roleKey: role.key,
+    outputPath,
+    templates: session.templates,
+  })
+  session.structuredFallbackRoleSources = {
+    ...(session.structuredFallbackRoleSources || {}),
+    [role.key]: {
+      role: role.key,
+      label: role.label,
+      path: outputPath,
+      cacheKey,
+    },
+  }
+  return session.structuredFallbackRoleSources[role.key]
 }
 
 async function loadTemplateFillLibrary(template, libraryPath) {
@@ -1468,6 +1591,24 @@ async function runPptQualityCheck(session, aiProvider, update = () => {}, assert
       generatedAt: new Date().toISOString(),
     }
   }
+}
+
+function countTemplateFillEdits(fillPlan) {
+  return (fillPlan?.slides || []).reduce((total, slide) => {
+    const replacementCount = Array.isArray(slide?.replacements) ? slide.replacements.length : 0
+    const tableCellCount = (slide?.table_edits || []).reduce(
+      (sum, edit) => sum + (Array.isArray(edit?.cells) ? edit.cells.length : 0),
+      0,
+    )
+    const chartEditCount = Array.isArray(slide?.chart_edits) ? slide.chart_edits.length : 0
+    const extraShapeCount = Array.isArray(slide?.extra_shapes) ? slide.extra_shapes.length : 0
+    return total + replacementCount + tableCellCount + chartEditCount + extraShapeCount
+  }, 0)
+}
+
+function shouldRepairTemplateFillPlan(checkSummary, session) {
+  const warningLimit = Math.max(10, (Number(session?.slideCount) || 0) * 4)
+  return Number(checkSummary?.error || 0) > 0 || Number(checkSummary?.warn || 0) > warningLimit
 }
 
 function mergeTemplateFillPlanWithPptPlan(fillPlan, plan, targetSlideNumbers = []) {
@@ -1765,34 +1906,75 @@ function buildStructuredSourceCacheKey(session, mainTemplate) {
   const roleKeys = STRUCTURED_MASTER_ROLES.map((role) => {
     const master = session.structuredMasters?.[role.key]
     if (master) return `${role.key}:master:${master.cacheKey || master.size || master.originalName}`
-    return `${role.key}:fallback:${mainTemplate?.cacheKey || mainTemplate?.size || mainTemplate?.originalName || 'none'}`
+    return buildStructuredFallbackRoleCacheKey(session, role)
   })
-  return ['structured-source-v3', session.masterDescription || '', ...roleKeys].join('|')
+  return ['structured-source-v5', session.masterDescription || '', mainTemplate?.id || 'no-main', ...roleKeys].join('|')
 }
 
-function selectFallbackTemplateSlideForRole(mainTemplate, roleKey) {
-  const slideTexts = Array.isArray(mainTemplate?.slideTexts) ? mainTemplate.slideTexts : []
-  const slideCount = Number(mainTemplate?.slideCount) || slideTexts.length || 1
-  const findBy = (pattern) => slideTexts.find((slide) => pattern.test(String(slide.text || '')))?.slideNumber
-  const firstContent = slideTexts.find((slide, index) => {
-    if (index === 0 || index === slideTexts.length - 1) return false
-    const text = String(slide.text || '')
-    return !/目录|agenda|contents?|outline|议程|谢谢|thanks?|q&a|联系方式|结尾|总结|章节|section|part/i.test(text)
-  })?.slideNumber
+function buildStructuredFallbackRoleCacheKey(session, role) {
+  const templateKeys = (session.templates || []).map((template) => [
+    template.id,
+    template.cacheKey || template.size || template.originalName || '',
+    ...(template.detectedColors || []).slice(0, 5),
+  ].join(':'))
+  return `${role.key}:generated-fallback:${templateKeys.join(',') || 'no-template'}`
+}
 
-  if (roleKey === 'cover') return 1
-  if (roleKey === 'agenda') return clampSlideNumber(findBy(/目录|agenda|contents?|outline|议程/i) || 2, slideCount)
-  if (roleKey === 'section') {
-    const sparse = slideTexts.find((slide, index) => index > 0 && index < slideTexts.length - 1 && String(slide.text || '').length <= 90)?.slideNumber
-    return clampSlideNumber(findBy(/章节|chapter|section|part|部分/i) || sparse || firstContent || 1, slideCount)
+function selectTemplateRoleSource(session, role) {
+  const candidates = []
+  const templates = [...(session.templates || [])]
+    .filter((template) => template?.extension === '.pptx' && existsSync(template.path))
+    .sort((left, right) => {
+      if (left.id === session.mainTemplateId) return -1
+      if (right.id === session.mainTemplateId) return 1
+      return 0
+    })
+
+  templates.forEach((template, templateIndex) => {
+    const slideTexts = Array.isArray(template.slideTexts) ? template.slideTexts : []
+    const slideCount = Number(template.slideCount) || slideTexts.length || 1
+    for (let index = 1; index <= slideCount; index += 1) {
+      const slideText = slideTexts.find((item) => Number(item.slideNumber) === index)?.text || ''
+      const score = scoreTemplateSlideForRole(role.key, slideText, index, slideCount, templateIndex)
+      if (score <= 0) continue
+      candidates.push({
+        score,
+        source: 'template-fallback',
+        label: role.label,
+        originalName: `${template.originalName} 第 ${index} 页`,
+        templateName: template.originalName,
+        path: template.path,
+        slide: index,
+      })
+    }
+  })
+
+  return candidates.sort((left, right) => right.score - left.score)[0] || null
+}
+
+function scoreTemplateSlideForRole(roleKey, text, slideNumber, slideCount, templateIndex) {
+  const normalized = String(text || '').toLowerCase()
+  const positionBonus = Math.max(0, 8 - templateIndex)
+  const isFirst = slideNumber === 1
+  const isLast = slideNumber === slideCount
+  const isSparse = normalized.replace(/\s+/g, '').length <= 90
+  const hasAgenda = /目录|议程|大纲|agenda|contents?|outline/i.test(normalized)
+  const hasSection = /章节|第[一二三四五六七八九十\d]+[章节部分]|chapter|section|part/i.test(normalized)
+  const hasEnding = /谢谢|感谢|致谢|总结|结论|答疑|联系方式|thanks?|q&a|contact/i.test(normalized)
+
+  if (roleKey === 'cover') return (isFirst ? 120 : 0) + (isSparse ? 18 : 0) + positionBonus
+  if (roleKey === 'agenda') return (hasAgenda ? 130 : slideNumber === 2 ? 42 : 0) + positionBonus
+  if (roleKey === 'section') return (hasSection ? 130 : isSparse && !isFirst && !isLast && !hasAgenda ? 55 : 0) + positionBonus
+  if (roleKey === 'ending') return (hasEnding ? 130 : isLast ? 62 : 0) + positionBonus
+  if (roleKey === 'content') {
+    if (isFirst || isLast || hasAgenda || hasSection || hasEnding) return 0
+    return 85 + (isSparse ? 0 : 18) + positionBonus
   }
-  if (roleKey === 'ending') return clampSlideNumber(findBy(/谢谢|thanks?|q&a|联系方式|结尾|总结|致谢/i) || slideCount, slideCount)
-  return clampSlideNumber(firstContent || Math.min(3, slideCount), slideCount)
+  return 0
 }
 
-function clampSlideNumber(value, slideCount) {
-  const number = Number(value) || 1
-  return Math.max(1, Math.min(Number(slideCount) || 1, number))
+function hasUploadedStructuredMasters(session) {
+  return STRUCTURED_MASTER_ROLES.some((role) => Boolean(session.structuredMasters?.[role.key]))
 }
 
 function mergeStructuredMasterColors(structuredMasters, mainTemplate) {
