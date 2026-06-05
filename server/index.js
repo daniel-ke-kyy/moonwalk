@@ -36,6 +36,7 @@ import {
   adaptTemplateFillPlanToCapacity,
   analyzeTemplateFillLibrary,
   applyTemplateFillPlan,
+  buildStructuredSourceDeck,
   buildTemplatePageProfiles,
   checkTemplateFillPlan,
   normalizePptxForRendering,
@@ -46,11 +47,16 @@ import {
 } from './pptTemplateFill.js'
 import {
   analyzeMasterFile,
+  analyzeStructuredMasterFiles,
   analyzeTemplateFiles,
   buildMasterContext,
+  buildStructuredMasterContext,
   buildTemplateContext,
   configurePptTemplateCache,
   extractContentFileText,
+  hasStructuredMasters,
+  serializeStructuredMasters,
+  STRUCTURED_MASTER_ROLES,
 } from './pptTemplateProcessor.js'
 import {
   ALLOWED_EXTENSIONS,
@@ -222,6 +228,11 @@ app.post('/api/ppt/analyze', upload.fields([
   { name: 'templates', maxCount: 10 },
   { name: 'contentFile', maxCount: 1 },
   { name: 'master', maxCount: 1 },
+  { name: 'masterCover', maxCount: 1 },
+  { name: 'masterAgenda', maxCount: 1 },
+  { name: 'masterSection', maxCount: 1 },
+  { name: 'masterContent', maxCount: 1 },
+  { name: 'masterEnding', maxCount: 1 },
 ]), async (req, res) => {
   try {
     await assertPptRendererReady()
@@ -370,8 +381,15 @@ async function analyzePptUploadSession({ aiProvider, files, body, sessionId, ses
   const contentFileResult = await extractContentFileText(contentFile)
 
   assertNotCancelled()
-  update(masterFile ? '正在识别幻灯片母版结构。' : '正在整理模板生成设置。')
-  const master = await analyzeMasterFile(masterFile, sessionDir)
+  const structuredMasterFiles = STRUCTURED_MASTER_ROLES.filter((role) => Array.isArray(files?.[role.field]) && files[role.field][0])
+  update(structuredMasterFiles.length
+    ? `正在识别 ${structuredMasterFiles.length} 个角色母版。`
+    : masterFile
+      ? '正在识别幻灯片母版结构。'
+      : '正在整理模板生成设置。')
+  const structuredMasters = await analyzeStructuredMasterFiles(files, sessionDir)
+  const usesStructuredMasters = hasStructuredMasters(structuredMasters)
+  const master = usesStructuredMasters ? null : await analyzeMasterFile(masterFile, sessionDir)
 
   assertNotCancelled()
   const session = {
@@ -384,10 +402,14 @@ async function analyzePptUploadSession({ aiProvider, files, body, sessionId, ses
     contentFileInfo: contentFileResult.fileInfo,
     requirements: normalizeLongText(body?.requirements, 12000),
     master,
+    structuredMasters,
     masterDescription: normalizeLongText(body?.masterDescription, 12000),
     mode: null,
     pptType: null,
     slideCount: null,
+    contentSlideCount: null,
+    structuredPagePlan: null,
+    structuredTemplateFillSource: null,
     mainTemplateId: templates[0]?.id || null,
     plan: null,
     narrativePlan: null,
@@ -400,7 +422,9 @@ async function analyzePptUploadSession({ aiProvider, files, body, sessionId, ses
       templateHits: cachedTemplateCount,
       templateTotal: templates.length,
       contentHit: Boolean(contentFileResult.cacheHit),
-      masterHit: Boolean(master?.cacheHit),
+      masterHit: Boolean(master?.cacheHit || Object.values(structuredMasters).some((item) => item?.cacheHit)),
+      structuredMasterHits: Object.values(structuredMasters).filter((item) => item?.cacheHit).length,
+      structuredMasterTotal: Object.keys(structuredMasters).length,
     },
     createdAt: Date.now(),
   }
@@ -807,7 +831,7 @@ function normalizePptGenerationSettings(body) {
   if (!PPT_MODES.includes(mode)) throw new Error('PPT 生成模式无效。')
   if (!PPT_TYPES.includes(pptType)) throw new Error('PPT 类型无效。')
   if (!Number.isInteger(slideCount) || slideCount < PPT_MIN_SLIDES || slideCount > PPT_MAX_SLIDES) {
-    throw new Error(`PPT 页数必须在 ${PPT_MIN_SLIDES} 到 ${PPT_MAX_SLIDES} 页之间。`)
+    throw new Error(`PPT 内容页数必须在 ${PPT_MIN_SLIDES} 到 ${PPT_MAX_SLIDES} 页之间。`)
   }
 
   return {
@@ -846,7 +870,11 @@ function applyPptSettings(session, settings) {
   session.mainTemplateId = settings.mainTemplateId
   session.mode = settings.mode
   session.pptType = settings.pptType
-  session.slideCount = settings.slideCount
+  session.contentSlideCount = settings.slideCount
+  session.structuredPagePlan = hasStructuredMasters(session.structuredMasters)
+    ? buildStructuredPagePlan(settings.slideCount)
+    : null
+  session.slideCount = session.structuredPagePlan?.totalSlides || settings.slideCount
   session.contentText = settings.contentText
   session.requirements = settings.requirements
   session.masterDescription = settings.masterDescription
@@ -864,12 +892,15 @@ function buildPptAiContext(session) {
     pptType: session.pptType,
     mode: session.mode,
     slideCount: session.slideCount,
+    contentSlideCount: session.contentSlideCount || session.slideCount,
     mainTemplateName: mainTemplate?.originalName || '未命名模板',
     auxiliaryTemplateNames: auxiliaryTemplates.map((template) => template.originalName),
     contentText: session.contentText,
     contentFileText: session.contentFileText,
     requirements: session.requirements,
     master: buildMasterContext(session.master, session.masterDescription),
+    structuredMasters: buildStructuredMasterContext(session.structuredMasters, session.masterDescription),
+    structuredPagePlan: session.structuredPagePlan || null,
     templates: buildTemplateContext(session.templates),
   }
 }
@@ -877,7 +908,7 @@ function buildPptAiContext(session) {
 async function generatePptSessionOutput(session, aiProvider, update = () => {}, assertNotCancelled = () => {}) {
   assertNotCancelled()
   const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
-  const templateFillSource = getTemplateFillSource(session, mainTemplate)
+  const templateFillSource = await getTemplateFillSource(session, mainTemplate, update)
   session.narrativePlan = null
   session.templateDiagnostics = null
   if (templateFillSource && typeof aiProvider.module.generatePptTemplateFillPlan === 'function') {
@@ -885,9 +916,12 @@ async function generatePptSessionOutput(session, aiProvider, update = () => {}, 
       assertNotCancelled()
       update(templateFillSource.role === 'master'
         ? '正在直接编辑母版 PPTX 中的原始文本框。'
-        : '正在尝试使用模板填充引擎复用原 PPT 结构。')
+        : templateFillSource.role === 'structured-master'
+          ? '正在按五类母版固定页型直接编辑 PPTX。'
+          : '正在尝试使用模板填充引擎复用原 PPT 结构。')
       await renderTemplateFillSessionOutput(session, aiProvider, templateFillSource.template, update, {
         sourceRole: templateFillSource.role,
+        structured: Boolean(templateFillSource.structured),
       }, assertNotCancelled)
       assertNotCancelled()
       await runPptQualityCheck(session, aiProvider, update, assertNotCancelled)
@@ -896,6 +930,9 @@ async function generatePptSessionOutput(session, aiProvider, update = () => {}, 
       if (isPptJobCancelledError(error)) throw error
       if (templateFillSource.role === 'master') {
         throw new Error(`母版直接编辑失败：${toUserError(error)}。请确认母版 PPTX 中包含可编辑文本框，而不是整页截图。`)
+      }
+      if (templateFillSource.role === 'structured-master') {
+        throw new Error(`五类母版直接编辑失败：${toUserError(error)}。请确认上传的母版是可编辑单页 PPTX，而不是整页截图。`)
       }
       console.warn(`PPT Master template-fill 失败，回退到原生成器：${toUserError(error)}`)
       session.templateFillFallbackReason = toUserError(error)
@@ -961,7 +998,7 @@ async function revisePptSessionPlan(session, aiProvider, slideComments, update =
 
 async function renderRevisedPptSessionOutput(session, aiProvider, plan, slideComments, update = () => {}, assertNotCancelled = () => {}) {
   const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
-  const templateFillSource = getTemplateFillSource(session, mainTemplate)
+  const templateFillSource = await getTemplateFillSource(session, mainTemplate, update)
   const canUseTemplateFillRevision = session.output?.engine === 'template-fill'
     && session.templateFillPlan
     && templateFillSource
@@ -972,12 +1009,15 @@ async function renderRevisedPptSessionOutput(session, aiProvider, plan, slideCom
       assertNotCancelled()
       update(templateFillSource.role === 'master'
         ? '正在沿用母版直接编辑，只更新有修改意见的页面。'
-        : '正在沿用模板填充引擎，只更新有修改意见的页面。')
+        : templateFillSource.role === 'structured-master'
+          ? '正在沿用五类母版直接编辑，只更新有修改意见的页面。'
+          : '正在沿用模板填充引擎，只更新有修改意见的页面。')
       await renderTemplateFillSessionOutput(session, aiProvider, templateFillSource.template, update, {
         baseFillPlan: session.templateFillPlan,
         targetSlideNumbers: slideComments.map((item) => item.slideNumber),
         planOverride: plan,
         sourceRole: templateFillSource.role,
+        structured: Boolean(templateFillSource.structured),
       }, assertNotCancelled)
       assertNotCancelled()
       await runPptQualityCheck(session, aiProvider, update, assertNotCancelled)
@@ -986,6 +1026,9 @@ async function renderRevisedPptSessionOutput(session, aiProvider, plan, slideCom
       if (isPptJobCancelledError(error)) throw error
       if (templateFillSource.role === 'master') {
         throw new Error(`母版直接修改失败：${toUserError(error)}。请确认母版 PPTX 中包含可编辑文本框。`)
+      }
+      if (templateFillSource.role === 'structured-master') {
+        throw new Error(`五类母版直接修改失败：${toUserError(error)}。请确认上传的角色母版是可编辑单页 PPTX。`)
       }
       console.warn(`PPT 局部模板填充修改失败，回退到普通渲染：${toUserError(error)}`)
       update('模板填充局部修改不够稳定，正在回退到普通渲染。')
@@ -1020,6 +1063,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
     fallbackTitle: mainTemplate.originalName || aiContext.fallbackTitle,
     templateFillSourceName: mainTemplate.originalName || '',
     templateFillSourceRole: options.sourceRole || 'template',
+    structuredPagePlan: options.structured ? session.structuredPagePlan : null,
   }
   let fillPlan = options.baseFillPlan ? clonePlain(options.baseFillPlan) : null
   if (fillPlan && options.planOverride) {
@@ -1046,6 +1090,9 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
     })
   }
   assertNotCancelled()
+  if (options.structured) {
+    fillPlan = alignStructuredFillPlan(fillPlan, library, session.structuredPagePlan, session.narrativePlan, session.aiProviderId)
+  }
   const adapted = adaptTemplateFillPlanToCapacity(fillPlan, library, session.narrativePlan)
   fillPlan = adapted.plan
   session.templateDiagnostics = {
@@ -1056,7 +1103,10 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   }
 
   const replacementCount = fillPlan.slides.reduce((total, slide) => total + slide.replacements.length, 0)
-  if (replacementCount < Math.max(3, Math.ceil(session.slideCount * 1.5))) {
+  const minimumReplacements = options.structured
+    ? Math.max(3, Math.ceil((session.contentSlideCount || session.slideCount) * 1.1))
+    : Math.max(3, Math.ceil(session.slideCount * 1.5))
+  if (replacementCount < minimumReplacements) {
     throw new Error('模板填充计划有效替换内容太少，已回退到普通生成。')
   }
   await writeTemplateFillPlan(planPath, fillPlan)
@@ -1128,7 +1178,11 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   }
 }
 
-function getTemplateFillSource(session, mainTemplate) {
+async function getTemplateFillSource(session, mainTemplate, update = () => {}) {
+  if (hasStructuredMasters(session.structuredMasters)) {
+    const template = await ensureStructuredTemplateFillSource(session, mainTemplate, update)
+    return { template, role: 'structured-master', structured: true }
+  }
   if (session.master?.extension === '.pptx') {
     return { template: session.master, role: 'master' }
   }
@@ -1136,6 +1190,57 @@ function getTemplateFillSource(session, mainTemplate) {
     return { template: mainTemplate, role: 'template' }
   }
   return null
+}
+
+async function ensureStructuredTemplateFillSource(session, mainTemplate, update = () => {}) {
+  const cacheKey = buildStructuredSourceCacheKey(session, mainTemplate)
+  if (session.structuredTemplateFillSource?.cacheKey === cacheKey && existsSync(session.structuredTemplateFillSource.path)) {
+    return session.structuredTemplateFillSource
+  }
+
+  const allRolesUploaded = STRUCTURED_MASTER_ROLES.every((role) => session.structuredMasters?.[role.key])
+  if (!allRolesUploaded && mainTemplate?.extension !== '.pptx') {
+    throw new Error('五类母版只上传了部分页型时，缺失页型需要一个 PPTX 主模板作为可编辑来源；请改选 PPTX 主模板，或上传完整五类母版。')
+  }
+
+  update('正在把五类母版和缺失页型模板合成为可编辑源 PPTX。')
+  const outputDir = path.join(session.sessionDir, 'structured-source')
+  const outputPath = path.join(outputDir, 'moonwalk-structured-source.pptx')
+  const manifest = {
+    sources: STRUCTURED_MASTER_ROLES.map((role) => {
+      const master = session.structuredMasters?.[role.key]
+      return {
+        id: role.key,
+        role: role.key,
+        label: role.label,
+        pptx: master?.path || mainTemplate.path,
+        slide: master ? 1 : selectFallbackTemplateSlideForRole(mainTemplate, role.key),
+      }
+    }),
+  }
+  await buildStructuredSourceDeck(manifest, outputPath)
+
+  const roleNames = STRUCTURED_MASTER_ROLES
+    .filter((role) => session.structuredMasters?.[role.key])
+    .map((role) => role.label)
+  session.structuredTemplateFillSource = {
+    id: 'structured_masters',
+    originalName: roleNames.length ? `五类母版组合源（${roleNames.join('、')}）` : '五类母版组合源',
+    extension: '.pptx',
+    size: 0,
+    path: outputPath,
+    pageCount: null,
+    slideCount: STRUCTURED_MASTER_ROLES.length,
+    role: 'structured-master',
+    textSample: '',
+    detectedColors: mergeStructuredMasterColors(session.structuredMasters, mainTemplate),
+    previewPaths: [],
+    assets: [],
+    slideTexts: [],
+    cacheKey,
+    cacheHit: false,
+  }
+  return session.structuredTemplateFillSource
 }
 
 async function loadTemplateFillLibrary(template, libraryPath) {
@@ -1396,6 +1501,332 @@ function mergeTemplateFillPlanWithPptPlan(fillPlan, plan, targetSlideNumbers = [
   }
 }
 
+function buildStructuredPagePlan(contentSlideCount) {
+  const contentCount = Math.max(PPT_MIN_SLIDES, Math.min(PPT_MAX_SLIDES, Number(contentSlideCount) || 10))
+  const chapterCount = Math.max(1, Math.min(contentCount, 6, Math.ceil(contentCount / 4)))
+  const baseSize = Math.floor(contentCount / chapterCount)
+  const extraCount = contentCount % chapterCount
+  const chapterSizes = Array.from({ length: chapterCount }, (_, index) => baseSize + (index < extraCount ? 1 : 0))
+  const slides = []
+  const chapters = []
+
+  slides.push(buildStructuredSlidePlanItem({
+    role: 'cover',
+    slideNumber: slides.length + 1,
+  }))
+  slides.push(buildStructuredSlidePlanItem({
+    role: 'agenda',
+    slideNumber: slides.length + 1,
+  }))
+
+  let contentIndex = 0
+  chapterSizes.forEach((size, chapterOffset) => {
+    const chapterIndex = chapterOffset + 1
+    const chapter = {
+      chapterIndex,
+      title: `第 ${chapterIndex} 部分`,
+      sectionSlideNumber: slides.length + 1,
+      contentStart: contentIndex + 1,
+      contentEnd: contentIndex + size,
+      contentSlideNumbers: [],
+    }
+    slides.push(buildStructuredSlidePlanItem({
+      role: 'section',
+      slideNumber: slides.length + 1,
+      chapterIndex,
+    }))
+    for (let offset = 0; offset < size; offset += 1) {
+      contentIndex += 1
+      const slideNumber = slides.length + 1
+      chapter.contentSlideNumbers.push(slideNumber)
+      slides.push(buildStructuredSlidePlanItem({
+        role: 'content',
+        slideNumber,
+        chapterIndex,
+        contentIndex,
+      }))
+    }
+    chapters.push(chapter)
+  })
+
+  slides.push(buildStructuredSlidePlanItem({
+    role: 'ending',
+    slideNumber: slides.length + 1,
+  }))
+
+  return {
+    contentSlideCount: contentCount,
+    chapterCount,
+    totalSlides: slides.length,
+    roleSourceSlides: Object.fromEntries(STRUCTURED_MASTER_ROLES.map((role) => [role.key, role.sourceSlide])),
+    chapters,
+    slides,
+  }
+}
+
+function buildStructuredSlidePlanItem({ role, slideNumber, chapterIndex = null, contentIndex = null }) {
+  const meta = STRUCTURED_MASTER_ROLES.find((item) => item.key === role) || STRUCTURED_MASTER_ROLES[3]
+  return {
+    slideNumber,
+    role,
+    layout: meta.layout,
+    sourceSlide: meta.sourceSlide,
+    suggestedTemplateRole: meta.suggestedTemplateRole,
+    chapterIndex,
+    contentIndex,
+  }
+}
+
+function alignStructuredFillPlan(fillPlan, library, structuredPagePlan, narrativePlan, aiProviderId = '') {
+  const plannedSlides = Array.isArray(structuredPagePlan?.slides) ? structuredPagePlan.slides : []
+  if (!plannedSlides.length) return fillPlan
+  const slideLookup = new Map((library?.slides || []).map((slide) => [Number(slide.slide_index), slide]))
+  const originalSlides = Array.isArray(fillPlan?.slides) ? fillPlan.slides : []
+  const alignedSlides = plannedSlides.map((plannedSlide, index) => {
+    const originalSlide = originalSlides[index] || {}
+    const sourceSlide = Number(plannedSlide.sourceSlide) || 4
+    const librarySlide = slideLookup.get(sourceSlide) || { slots: [] }
+    const validSlotIds = new Set((librarySlide.slots || []).map((slot) => String(slot.slot_id)).filter(Boolean))
+    const existingBySlot = new Map(
+      (Array.isArray(originalSlide.replacements) ? originalSlide.replacements : [])
+        .map((replacement) => ({
+          slotId: String(replacement?.slot_id || '').trim(),
+          text: String(replacement?.text || '').trim(),
+        }))
+        .filter((replacement) => replacement.slotId && replacement.text && validSlotIds.has(replacement.slotId))
+        .map((replacement) => [replacement.slotId, replacement.text]),
+    )
+    const existingTexts = (Array.isArray(originalSlide.replacements) ? originalSlide.replacements : [])
+      .map((replacement) => String(replacement?.text || '').trim())
+      .filter(Boolean)
+    const fallbackTexts = buildStructuredReplacementTexts({
+      plannedSlide,
+      index,
+      fillPlan,
+      structuredPagePlan,
+      narrativePlan,
+    })
+    const candidateTexts = uniqueStrings([...existingTexts, ...fallbackTexts])
+    const replaceableSlots = selectStructuredReplacementSlots(librarySlide, plannedSlide.role)
+    const replacements = []
+
+    replaceableSlots.forEach((slot, slotIndex) => {
+      const slotId = String(slot.slot_id || '').trim()
+      if (!slotId) return
+      const text = existingBySlot.get(slotId) || candidateTexts[slotIndex] || candidateTexts.at(-1) || ''
+      if (!text) return
+      replacements.push({ slot_id: slotId, text })
+    })
+
+    const extraShapes = normalizeStructuredExtraShapes(originalSlide.extra_shapes, plannedSlide.role, aiProviderId)
+    if (plannedSlide.role === 'content' && replacements.length < 2 && candidateTexts.length >= 2) {
+      extraShapes.push(buildStructuredFallbackTextShape(candidateTexts.slice(replacements.length, replacements.length + 3)))
+    }
+
+    return {
+      ...originalSlide,
+      source_slide: sourceSlide,
+      purpose: plannedSlide.role,
+      layout: plannedSlide.layout,
+      notes: String(originalSlide.notes || fallbackTexts.slice(0, 3).join('。')),
+      transition: originalSlide.transition || 'keep',
+      replacements,
+      table_edits: Array.isArray(originalSlide.table_edits) ? originalSlide.table_edits : [],
+      chart_edits: Array.isArray(originalSlide.chart_edits) ? originalSlide.chart_edits : [],
+      extra_shapes: extraShapes,
+    }
+  })
+
+  return {
+    schema: 'template_fill_pptx_plan.v1',
+    title: String(fillPlan?.title || narrativePlan?.title || 'Moonwalk PPT'),
+    subtitle: String(fillPlan?.subtitle || narrativePlan?.subtitle || ''),
+    slides: alignedSlides,
+  }
+}
+
+function buildStructuredReplacementTexts({ plannedSlide, index, fillPlan, structuredPagePlan, narrativePlan }) {
+  const narrativeSlide = narrativePlan?.slides?.[index] || null
+  const chapter = plannedSlide.chapterIndex
+    ? structuredPagePlan.chapters?.find((item) => item.chapterIndex === plannedSlide.chapterIndex)
+    : null
+  const chapterTitle = chapter ? inferStructuredChapterTitle(chapter, narrativePlan) : ''
+  const deckTitle = String(fillPlan?.title || narrativePlan?.title || 'Moonwalk PPT')
+  const deckSubtitle = String(fillPlan?.subtitle || narrativePlan?.subtitle || narrativePlan?.coreMessage || '')
+  const keyMessage = String(narrativeSlide?.keyMessage || '')
+  const mustSay = normalizeTextList(narrativeSlide?.mustSay)
+  const supportingPoints = normalizeTextList(narrativeSlide?.supportingPoints)
+
+  if (plannedSlide.role === 'cover') {
+    return uniqueStrings([deckTitle, deckSubtitle, keyMessage, narrativePlan?.coreMessage])
+  }
+  if (plannedSlide.role === 'agenda') {
+    const chapterTitles = (structuredPagePlan.chapters || []).map((item) => inferStructuredChapterTitle(item, narrativePlan))
+    return uniqueStrings(['目录', ...chapterTitles, narrativePlan?.coreMessage])
+  }
+  if (plannedSlide.role === 'section') {
+    return uniqueStrings([chapterTitle, keyMessage, ...mustSay, ...supportingPoints])
+  }
+  if (plannedSlide.role === 'ending') {
+    return uniqueStrings(['总结与下一步', narrativePlan?.coreMessage, keyMessage, ...mustSay, ...supportingPoints, '谢谢观看'])
+  }
+  return uniqueStrings([keyMessage || chapterTitle || `内容页 ${plannedSlide.contentIndex || ''}`, ...mustSay, ...supportingPoints])
+}
+
+function inferStructuredChapterTitle(chapter, narrativePlan) {
+  const sectionSlide = narrativePlan?.slides?.[(chapter.sectionSlideNumber || 1) - 1]
+  if (sectionSlide?.keyMessage) return trimInlineText(sectionSlide.keyMessage, 18)
+  const firstContent = narrativePlan?.slides?.[(chapter.contentSlideNumbers?.[0] || chapter.contentStart || 1) - 1]
+  if (firstContent?.keyMessage) return trimInlineText(firstContent.keyMessage, 18)
+  return chapter.title || `第 ${chapter.chapterIndex} 部分`
+}
+
+function selectStructuredReplacementSlots(librarySlide, role) {
+  const slots = Array.isArray(librarySlide?.slots) ? librarySlide.slots : []
+  const replaceable = slots.filter((slot) => isStructuredReplaceableSlot(slot, role))
+  const selected = replaceable.length ? replaceable : slots.filter((slot) => isStructuredFallbackSlot(slot, role))
+  return selected
+    .sort((left, right) => compareSlotPosition(left, right))
+    .slice(0, role === 'content' ? 8 : 6)
+}
+
+function isStructuredReplaceableSlot(slot, role) {
+  const text = String(slot?.text || '').trim()
+  const slotRole = String(slot?.role || '')
+  if (isFixedStructuredSlotText(text)) return false
+  if (isStructuredPlaceholderText(text)) return true
+  if (!text && role === 'content' && slotRole.includes('body')) return true
+  if (role === 'agenda' && slotRole.includes('body')) return true
+  if ((role === 'cover' || role === 'section' || role === 'ending') && slotRole.includes('title')) return true
+  return role === 'content' && (slotRole.includes('title') || slotRole.includes('body'))
+}
+
+function isStructuredFallbackSlot(slot, role) {
+  const text = String(slot?.text || '').trim()
+  const slotRole = String(slot?.role || '')
+  if (isFixedStructuredSlotText(text)) return false
+  if (!text) return role === 'content' && slotRole.includes('body')
+  return slotRole.includes('title') || slotRole.includes('body')
+}
+
+function isStructuredPlaceholderText(text) {
+  return /x{2,}|\.{3,}|…{2,}|标题|正文|请输入|占位|单击此处|click\s+to\s+add|lorem/i.test(text)
+}
+
+function isFixedStructuredSlotText(text) {
+  if (!text) return false
+  const compact = text.replace(/\s+/g, '')
+  if (/^(logo|页码|page|date|日期|copyright|©|品牌标语|slogan)$/i.test(compact)) return true
+  if (/(www\.|https?:\/\/|@)/i.test(text)) return true
+  if (/^\d{4}[./年-]\d{1,2}/.test(compact)) return true
+  if (/^\d{1,2}\s*\/\s*\d{1,2}$/.test(compact)) return true
+  if (/^[0-9０-９ivxIVX一二三四五六七八九十./\-]+$/.test(compact) && compact.length <= 5) return true
+  return false
+}
+
+function compareSlotPosition(left, right) {
+  const leftGeometry = left?.geometry || {}
+  const rightGeometry = right?.geometry || {}
+  const leftY = Number(leftGeometry.y ?? 9999)
+  const rightY = Number(rightGeometry.y ?? 9999)
+  if (leftY !== rightY) return leftY - rightY
+  return Number(leftGeometry.x ?? 9999) - Number(rightGeometry.x ?? 9999)
+}
+
+function normalizeStructuredExtraShapes(value, role, aiProviderId) {
+  if (role !== 'content' || !Array.isArray(value)) return []
+  return value
+    .filter((shape) => {
+      const kind = String(shape?.kind || '')
+      if (kind === 'image_placeholder') return aiProviderId === 'openai'
+      return kind === 'text' || kind === 'rect'
+    })
+    .slice(0, 3)
+}
+
+function buildStructuredFallbackTextShape(texts) {
+  return {
+    kind: 'text',
+    x: 0.08,
+    y: 0.22,
+    width: 0.38,
+    height: 0.22,
+    text: texts.filter(Boolean).join('\n'),
+    fill_color: 'FFF7EE',
+    line_color: 'DCAE80',
+    font_color: '71472A',
+    font_size: 13,
+    fill_transparency: 100,
+    line_transparency: 100,
+  }
+}
+
+function buildStructuredSourceCacheKey(session, mainTemplate) {
+  const roleKeys = STRUCTURED_MASTER_ROLES.map((role) => {
+    const master = session.structuredMasters?.[role.key]
+    if (master) return `${role.key}:master:${master.cacheKey || master.size || master.originalName}`
+    return `${role.key}:fallback:${mainTemplate?.cacheKey || mainTemplate?.size || mainTemplate?.originalName || 'none'}`
+  })
+  return ['structured-source-v3', session.masterDescription || '', ...roleKeys].join('|')
+}
+
+function selectFallbackTemplateSlideForRole(mainTemplate, roleKey) {
+  const slideTexts = Array.isArray(mainTemplate?.slideTexts) ? mainTemplate.slideTexts : []
+  const slideCount = Number(mainTemplate?.slideCount) || slideTexts.length || 1
+  const findBy = (pattern) => slideTexts.find((slide) => pattern.test(String(slide.text || '')))?.slideNumber
+  const firstContent = slideTexts.find((slide, index) => {
+    if (index === 0 || index === slideTexts.length - 1) return false
+    const text = String(slide.text || '')
+    return !/目录|agenda|contents?|outline|议程|谢谢|thanks?|q&a|联系方式|结尾|总结|章节|section|part/i.test(text)
+  })?.slideNumber
+
+  if (roleKey === 'cover') return 1
+  if (roleKey === 'agenda') return clampSlideNumber(findBy(/目录|agenda|contents?|outline|议程/i) || 2, slideCount)
+  if (roleKey === 'section') {
+    const sparse = slideTexts.find((slide, index) => index > 0 && index < slideTexts.length - 1 && String(slide.text || '').length <= 90)?.slideNumber
+    return clampSlideNumber(findBy(/章节|chapter|section|part|部分/i) || sparse || firstContent || 1, slideCount)
+  }
+  if (roleKey === 'ending') return clampSlideNumber(findBy(/谢谢|thanks?|q&a|联系方式|结尾|总结|致谢/i) || slideCount, slideCount)
+  return clampSlideNumber(firstContent || Math.min(3, slideCount), slideCount)
+}
+
+function clampSlideNumber(value, slideCount) {
+  const number = Number(value) || 1
+  return Math.max(1, Math.min(Number(slideCount) || 1, number))
+}
+
+function mergeStructuredMasterColors(structuredMasters, mainTemplate) {
+  const colors = []
+  for (const role of STRUCTURED_MASTER_ROLES) {
+    colors.push(...(structuredMasters?.[role.key]?.detectedColors || []))
+  }
+  colors.push(...(mainTemplate?.detectedColors || []))
+  return uniqueStrings(colors).slice(0, 8)
+}
+
+function normalizeTextList(value) {
+  return Array.isArray(value)
+    ? value.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+}
+
+function uniqueStrings(values) {
+  const seen = new Set()
+  const output = []
+  for (const value of values) {
+    const text = String(value || '').trim()
+    if (!text || seen.has(text)) continue
+    seen.add(text)
+    output.push(text)
+  }
+  return output
+}
+
+function trimInlineText(value, maxLength) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  return text.length > maxLength ? text.slice(0, maxLength) : text
+}
+
 function serializePptSession(session) {
   return {
     sessionId: session.id,
@@ -1404,6 +1835,8 @@ function serializePptSession(session) {
     mode: session.mode,
     pptType: session.pptType,
     slideCount: session.slideCount,
+    contentSlideCount: session.contentSlideCount,
+    structuredPagePlan: session.structuredPagePlan || null,
     contentFileInfo: session.contentFileInfo,
     masterDescription: session.masterDescription,
     cacheSummary: session.cacheSummary || null,
@@ -1421,7 +1854,10 @@ function serializePptSession(session) {
           imageCount: session.master.assets.length,
           slideRoles: session.master.slideRoles,
           previewUrls: session.master.previewPaths.map((filePath) => toUploadFileUrl(filePath)),
-        }
+      }
+      : null,
+    structuredMasters: hasStructuredMasters(session.structuredMasters)
+      ? serializeStructuredMasters(session.structuredMasters, toUploadFileUrl)
       : null,
     templates: session.templates.map((template) => ({
       id: template.id,

@@ -17,6 +17,7 @@ from .chart_fill import (
     _max_embedding_part_number,
 )
 from .clone import _make_part_allocator, deep_clone_slide_private_parts
+from .extra_shapes import _apply_extra_shapes_to_slide
 from .notes import _find_notes_master_target, _slide_rels_with_notes
 from .ooxml import NS, REL_NS, SLIDE_REL_TYPE, _parse_slide_refs, _qn, _xml_bytes
 from .package import (
@@ -139,6 +140,10 @@ def apply_plan(
             next_chart_number=next_chart_number,
             next_embedding_number=next_embedding_number,
         )
+        extra_shapes = item.get("extra_shapes", [])
+        if not isinstance(extra_shapes, list):
+            raise RuntimeError(f"Slide {source_slide} extra_shapes must be a list")
+        _apply_extra_shapes_to_slide(slide_root, extra_shapes)
         entries[new_part] = _xml_bytes(slide_root)
         notes_text = str(item.get("notes") or item.get("speaker_notes") or "")
         entries[new_rels], note_entries = _slide_rels_with_notes(

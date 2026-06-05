@@ -25,6 +25,13 @@ const parser = new XMLParser({
 
 const templateExtensions = new Set(['.pptx', '.pdf'])
 const contentExtensions = new Set(['.txt', '.docx', '.pdf', '.pptx'])
+export const STRUCTURED_MASTER_ROLES = [
+  { key: 'cover', field: 'masterCover', label: '封面母版', sourceSlide: 1, layout: 'cover', suggestedTemplateRole: 'cover_candidate' },
+  { key: 'agenda', field: 'masterAgenda', label: '目录母版', sourceSlide: 2, layout: 'agenda', suggestedTemplateRole: 'toc_candidate' },
+  { key: 'section', field: 'masterSection', label: '标题页母版', sourceSlide: 3, layout: 'section', suggestedTemplateRole: 'chapter_candidate' },
+  { key: 'content', field: 'masterContent', label: '内容页母版', sourceSlide: 4, layout: 'content', suggestedTemplateRole: 'content_candidate' },
+  { key: 'ending', field: 'masterEnding', label: '结尾页母版', sourceSlide: 5, layout: 'summary', suggestedTemplateRole: 'ending_candidate' },
+]
 const templateAnalysisCache = new Map()
 const contentTextCache = new Map()
 const maxCacheEntries = 30
@@ -68,6 +75,35 @@ export async function analyzeMasterFile(file, sessionDir) {
     role: 'master',
     slideRoles: inferMasterSlideRoles(master.slideTexts || []),
   }
+}
+
+export async function analyzeStructuredMasterFiles(files, sessionDir) {
+  const masters = {}
+  for (const role of STRUCTURED_MASTER_ROLES) {
+    const file = Array.isArray(files?.[role.field]) ? files[role.field][0] : null
+    if (!file) continue
+    const master = await analyzeTemplateFile(file, 0, sessionDir, {
+      idPrefix: `master_${role.key}`,
+      directoryName: path.join('structured-masters', role.key),
+      role: `master-${role.key}`,
+      allowedExtensions: new Set(['.pptx']),
+      invalidExtensionMessage: `${role.label}第一版仅支持 PPTX。`,
+      fileLabel: role.label,
+      previewLimit: 1,
+    })
+    if (master.slideCount !== 1) {
+      throw new Error(`${role.label}「${master.originalName}」必须是单页 PPTX。请把对应母版单独存成 1 页后再上传。`)
+    }
+    masters[role.key] = {
+      ...master,
+      role: role.key,
+      masterRole: role.key,
+      roleLabel: role.label,
+      sourceSlide: role.sourceSlide,
+      slideRoles: [{ slideNumber: 1, role: role.key, text: master.slideTexts?.[0]?.text || '' }],
+    }
+  }
+  return masters
 }
 
 export async function extractContentFileText(file) {
@@ -150,6 +186,52 @@ export function buildMasterContext(master, description) {
     slideRoles: master?.slideRoles || [],
     description: description || '',
   }
+}
+
+export function buildStructuredMasterContext(structuredMasters, description) {
+  const items = STRUCTURED_MASTER_ROLES.map((role) => {
+    const master = structuredMasters?.[role.key] || null
+    return {
+      role: role.key,
+      label: role.label,
+      uploaded: Boolean(master),
+      originalName: master?.originalName || '',
+      textSample: master?.textSample || '',
+      detectedColors: master?.detectedColors || [],
+      imageCount: master?.assets?.length || 0,
+    }
+  })
+  if (!items.some((item) => item.uploaded) && !description) return null
+  return {
+    enabled: items.some((item) => item.uploaded),
+    description: description || '',
+    roles: items,
+  }
+}
+
+export function serializeStructuredMasters(structuredMasters, toUrl) {
+  const result = {}
+  for (const role of STRUCTURED_MASTER_ROLES) {
+    const master = structuredMasters?.[role.key]
+    result[role.key] = master
+      ? {
+          role: role.key,
+          label: role.label,
+          originalName: master.originalName,
+          extension: master.extension,
+          size: master.size,
+          slideCount: master.slideCount,
+          detectedColors: master.detectedColors,
+          imageCount: master.assets.length,
+          previewUrls: master.previewPaths.map((filePath) => toUrl(filePath)),
+        }
+      : null
+  }
+  return result
+}
+
+export function hasStructuredMasters(structuredMasters) {
+  return STRUCTURED_MASTER_ROLES.some((role) => Boolean(structuredMasters?.[role.key]))
 }
 
 async function analyzeTemplateFile(file, index, sessionDir, options = {}) {

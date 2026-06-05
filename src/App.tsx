@@ -25,6 +25,7 @@ type AssessmentMode = 'knowledge' | 'open'
 type AiProviderId = 'deepseek' | 'openai'
 type PptMode = '风格复用' | '版式套用' | '原稿改写'
 type PptType = '课程汇报' | '论文答辩' | '商业方案' | '读书报告' | '课堂展示' | '培训课件'
+type PptMasterRole = 'cover' | 'agenda' | 'section' | 'content' | 'ending'
 
 type AuthStatus = {
   required: boolean
@@ -188,6 +189,18 @@ type PptTemplate = {
   previewUrls: string[]
 }
 
+type PptStructuredMaster = {
+  role: PptMasterRole
+  label: string
+  originalName: string
+  extension: string
+  size: number
+  slideCount: number | null
+  detectedColors: string[]
+  imageCount: number
+  previewUrls: string[]
+}
+
 type PptSlidePlan = {
   title: string
   subtitle: string
@@ -271,12 +284,20 @@ type PptSessionResponse = {
   mode: PptMode | null
   pptType: PptType | null
   slideCount: number | null
+  contentSlideCount: number | null
+  structuredPagePlan?: {
+    contentSlideCount: number
+    chapterCount: number
+    totalSlides: number
+  } | null
   masterDescription: string
   cacheSummary?: {
     templateHits: number
     templateTotal: number
     contentHit: boolean
     masterHit: boolean
+    structuredMasterHits?: number
+    structuredMasterTotal?: number
     templateFillLibraryHit?: boolean
   } | null
   qualityCheck?: {
@@ -315,6 +336,7 @@ type PptSessionResponse = {
     slideRoles: Array<{ slideNumber: number; role: string; text: string }>
     previewUrls: string[]
   } | null
+  structuredMasters: Record<PptMasterRole, PptStructuredMaster | null> | null
   contentFileInfo: {
     originalName: string
     extension: string
@@ -381,10 +403,32 @@ const fallbackAiProviders: AiProviderStatus[] = [
     lowCostModelSelected: true,
   },
 ]
+const pptMasterRoles: Array<{
+  key: PptMasterRole
+  field: string
+  label: string
+  hint: string
+}> = [
+  { key: 'cover', field: 'masterCover', label: '封面母版', hint: '用于整套 PPT 封面' },
+  { key: 'agenda', field: 'masterAgenda', label: '目录母版', hint: '用于目录页，可复制或增删目录项' },
+  { key: 'section', field: 'masterSection', label: '标题页母版', hint: '用于每个章节前的标题页' },
+  { key: 'content', field: 'masterContent', label: '内容页母版', hint: '用于正文内容页，可追加可编辑元素' },
+  { key: 'ending', field: 'masterEnding', label: '结尾页母版', hint: '用于总结、致谢或结束页' },
+]
 const importanceLabels: Record<Importance, string> = {
   high: '重点',
   medium: '常规',
   low: '补充',
+}
+
+function createEmptyPptMasterFiles(): Record<PptMasterRole, File | null> {
+  return {
+    cover: null,
+    agenda: null,
+    section: null,
+    content: null,
+    ending: null,
+  }
 }
 
 function App() {
@@ -416,7 +460,7 @@ function App() {
   const [isReviewingOpen, setIsReviewingOpen] = useState(false)
   const [pptSession, setPptSession] = useState<PptSessionResponse | null>(null)
   const [pptTemplates, setPptTemplates] = useState<File[]>([])
-  const [pptMasterFile, setPptMasterFile] = useState<File | null>(null)
+  const [pptMasterFiles, setPptMasterFiles] = useState<Record<PptMasterRole, File | null>>(() => createEmptyPptMasterFiles())
   const [pptMasterDescription, setPptMasterDescription] = useState('')
   const [pptContentFile, setPptContentFile] = useState<File | null>(null)
   const [pptContentText, setPptContentText] = useState('')
@@ -657,7 +701,7 @@ function App() {
   function clearPptFlow() {
     setPptSession(null)
     setPptTemplates([])
-    setPptMasterFile(null)
+    setPptMasterFiles(createEmptyPptMasterFiles())
     setPptMasterDescription('')
     setPptContentFile(null)
     setPptContentText('')
@@ -700,7 +744,10 @@ function App() {
     try {
       const formData = new FormData()
       pptTemplates.forEach((file) => formData.append('templates', file))
-      if (pptMasterFile) formData.append('master', pptMasterFile)
+      pptMasterRoles.forEach((role) => {
+        const file = pptMasterFiles[role.key]
+        if (file) formData.append(role.field, file)
+      })
       if (pptContentFile) formData.append('contentFile', pptContentFile)
       formData.append('masterDescription', pptMasterDescription)
       formData.append('contentText', pptContentText)
@@ -950,9 +997,9 @@ function App() {
             setPptMainTemplateId('')
             setPptProgress(null)
           }}
-          masterFile={pptMasterFile}
-          setMasterFile={(file) => {
-            setPptMasterFile(file)
+          masterFiles={pptMasterFiles}
+          setMasterFile={(role, file) => {
+            setPptMasterFiles((current) => ({ ...current, [role]: file }))
             setPptSession(null)
             setPptMainTemplateId('')
             setPptProgress(null)
@@ -2134,7 +2181,7 @@ function PptSetupView({
   lockedAiProvider,
   templates,
   setTemplates,
-  masterFile,
+  masterFiles,
   setMasterFile,
   masterDescription,
   setMasterDescription,
@@ -2168,8 +2215,8 @@ function PptSetupView({
   lockedAiProvider: AiProviderId
   templates: File[]
   setTemplates: (files: File[]) => void
-  masterFile: File | null
-  setMasterFile: (file: File | null) => void
+  masterFiles: Record<PptMasterRole, File | null>
+  setMasterFile: (role: PptMasterRole, file: File | null) => void
   masterDescription: string
   setMasterDescription: (value: string) => void
   contentFile: File | null
@@ -2199,7 +2246,13 @@ function PptSetupView({
   onSwitchToDeepSeek: () => void
 }) {
   const templateInputRef = useRef<HTMLInputElement | null>(null)
-  const masterInputRef = useRef<HTMLInputElement | null>(null)
+  const masterInputRefs = useRef<Record<PptMasterRole, HTMLInputElement | null>>({
+    cover: null,
+    agenda: null,
+    section: null,
+    content: null,
+    ending: null,
+  })
   const contentInputRef = useRef<HTMLInputElement | null>(null)
   const modes = health?.limits.pptModes?.length ? health.limits.pptModes : fallbackPptModes
   const types = health?.limits.pptTypes?.length ? health.limits.pptTypes : fallbackPptTypes
@@ -2217,8 +2270,8 @@ function PptSetupView({
     event.target.value = ''
   }
 
-  function onMasterFileChange(event: ChangeEvent<HTMLInputElement>) {
-    setMasterFile(event.target.files?.[0] || null)
+  function onMasterFileChange(role: PptMasterRole, event: ChangeEvent<HTMLInputElement>) {
+    setMasterFile(role, event.target.files?.[0] || null)
     event.target.value = ''
   }
 
@@ -2258,13 +2311,18 @@ function PptSetupView({
             hidden
             onChange={onContentFileChange}
           />
-          <input
-            ref={masterInputRef}
-            type="file"
-            accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
-            hidden
-            onChange={onMasterFileChange}
-          />
+          {pptMasterRoles.map((role) => (
+            <input
+              key={role.key}
+              ref={(element) => {
+                masterInputRefs.current[role.key] = element
+              }}
+              type="file"
+              accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+              hidden
+              onChange={(event) => onMasterFileChange(role.key, event)}
+            />
+          ))}
 
           <button type="button" className="file-pick-button" onClick={() => templateInputRef.current?.click()}>
             <UploadCloud size={20} />
@@ -2283,31 +2341,54 @@ function PptSetupView({
 
           <section className="field-block master-block">
             <div className="section-title compact-title">
-              <h2>幻灯片母版</h2>
-              <span>可选</span>
+              <h2>五类母版上传</h2>
+              <span>可选 · 单页 PPTX</span>
             </div>
-            <button type="button" className="file-pick-button compact" onClick={() => masterInputRef.current?.click()}>
-              <UploadCloud size={20} />
-              <span>
-                <strong>上传母版 PPTX</strong>
-                <small>最多 1 个，母版优先于模板文件；不上传也可以只写说明</small>
-              </span>
-            </button>
-            {masterFile && (
-              <div className="selected-file-list single">
-                <span>{masterFile.name}</span>
-                <button type="button" onClick={() => setMasterFile(null)}>移除</button>
-              </div>
-            )}
+            <div className="master-role-grid">
+              {pptMasterRoles.map((role) => {
+                const file = masterFiles[role.key]
+                const analyzed = session?.structuredMasters?.[role.key] || null
+                const previewUrl = analyzed?.previewUrls?.[0]
+                return (
+                  <div className="master-role-card" key={role.key}>
+                    <button
+                      type="button"
+                      className="master-role-upload"
+                      onClick={() => masterInputRefs.current[role.key]?.click()}
+                    >
+                      <span className="master-role-preview">
+                        {previewUrl ? (
+                          <img src={withApiBase(previewUrl)} alt={role.label} />
+                        ) : (
+                          <UploadCloud size={20} />
+                        )}
+                      </span>
+                      <span>
+                        <strong>{role.label}</strong>
+                        <small>{file?.name || analyzed?.originalName || role.hint}</small>
+                      </span>
+                    </button>
+                    {(file || analyzed) && (
+                      <button type="button" className="master-role-remove" onClick={() => setMasterFile(role.key, null)}>
+                        移除
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
             <textarea
               value={masterDescription}
               onChange={(event) => setMasterDescription(event.target.value)}
-              placeholder="可选：例如保留母版页眉页脚和 logo，正文页更简洁；若不填写，将尽量 1:1 复刻母版视觉结构。"
+              placeholder="母版补充说明（可选）：例如保留页眉页脚和 logo，但正文页尽量更简洁；如果不上传任何母版，将按模板文件风格生成。"
             />
-            {session?.master && (
+            {session?.structuredPagePlan && (
               <div className="master-summary">
-                <strong>{session.master.originalName}</strong>
-                <span>{session.master.slideCount || 0} 页母版 · 已自动识别页型</span>
+                <strong>已启用五类母版结构</strong>
+                <span>
+                  {session.structuredPagePlan.contentSlideCount} 页内容 · {session.structuredPagePlan.chapterCount} 个章节 ·
+                  预计生成 {session.structuredPagePlan.totalSlides} 页总稿
+                </span>
               </div>
             )}
           </section>
@@ -2359,7 +2440,7 @@ function PptSetupView({
         <aside className="panel ppt-settings-panel">
           <div className="section-title">
             <h2>生成规则</h2>
-            <span>{slideCount} 页</span>
+            <span>{slideCount} 页内容</span>
           </div>
 
           <fieldset>
@@ -2395,7 +2476,7 @@ function PptSetupView({
           </fieldset>
 
           <label className="field-block">
-            <span>生成页数</span>
+            <span>PPT 内容页数</span>
             <input
               type="number"
               min={minSlides}
@@ -2409,7 +2490,7 @@ function PptSetupView({
           </label>
 
           <div className="ppt-note">
-            第一版会优先复用模板的视觉风格、版式秩序、可提取图片和文字结构；PDF 模板作为视觉参考。
+            内容页数不包含封面、目录、章节标题页和结尾页。上传五类母版后，系统会在可编辑 PPTX 母版上直接替换和追加内容。
           </div>
 
           <button
@@ -2893,7 +2974,11 @@ function formatPptCacheSummary(cacheSummary: NonNullable<PptSessionResponse['cac
     parts.push('模板分析结果已加入缓存')
   }
   if (cacheSummary.contentHit) parts.push('内容文件缓存命中')
-  if (cacheSummary.masterHit) parts.push('母版缓存命中')
+  if (cacheSummary.structuredMasterTotal && cacheSummary.structuredMasterTotal > 0) {
+    parts.push(`五类母版缓存 ${cacheSummary.structuredMasterHits || 0}/${cacheSummary.structuredMasterTotal}`)
+  } else if (cacheSummary.masterHit) {
+    parts.push('母版缓存命中')
+  }
   if (cacheSummary.templateFillLibraryHit) parts.push('PPT 版式库缓存命中')
   return `${parts.join(' · ')}，下次上传相同文件会更快。`
 }

@@ -8,6 +8,7 @@ const execFileAsync = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const pythonBin = process.env.PYTHON_BIN || 'python3'
 const templateFillScript = path.join(__dirname, 'vendor/ppt-master/scripts/template_fill_pptx.py')
+const structuredSourcesScript = path.join(__dirname, 'vendor/ppt-master/scripts/structured_sources_pptx.py')
 const commandTimeoutMs = 180000
 const commandMaxBuffer = 20 * 1024 * 1024
 
@@ -33,6 +34,22 @@ export async function applyTemplateFillPlan(pptxPath, planPath, outputPath) {
   await mkdir(path.dirname(outputPath), { recursive: true })
   const result = await runTemplateFillCommand(['apply', pptxPath, planPath, '-o', outputPath])
   return findAppliedPptxPath(outputPath, result.stderr)
+}
+
+export async function buildStructuredSourceDeck(manifest, outputPath) {
+  await mkdir(path.dirname(outputPath), { recursive: true })
+  const manifestPath = outputPath.replace(/\.pptx$/i, '.manifest.json')
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+  try {
+    await execFileAsync(pythonBin, [structuredSourcesScript, manifestPath, outputPath], {
+      timeout: commandTimeoutMs,
+      maxBuffer: commandMaxBuffer,
+    })
+    return outputPath
+  } catch (error) {
+    const detail = [error.stderr, error.stdout, error.message].filter(Boolean).join('\n').trim()
+    throw new Error(detail || '结构化母版源 PPTX 生成失败。')
+  }
 }
 
 export async function normalizePptxForRendering(pptxPath) {
@@ -207,6 +224,7 @@ export function normalizeTemplateFillPlan(value, library, expectedCount) {
       replacements,
       table_edits: Array.isArray(slide?.table_edits) ? slide.table_edits : [],
       chart_edits: Array.isArray(slide?.chart_edits) ? slide.chart_edits : [],
+      extra_shapes: normalizeExtraShapes(slide?.extra_shapes),
     }
   })
 
@@ -220,6 +238,47 @@ export function normalizeTemplateFillPlan(value, library, expectedCount) {
     subtitle: String(value?.subtitle || ''),
     slides: normalizedSlides,
   }
+}
+
+function normalizeExtraShapes(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((shape) => {
+      const kind = ['text', 'rect', 'image_placeholder'].includes(shape?.kind) ? shape.kind : 'text'
+      return {
+        kind,
+        x: normalizeUnit(shape?.x, 0.08),
+        y: normalizeUnit(shape?.y, 0.18),
+        width: normalizeUnit(shape?.width, 0.32),
+        height: normalizeUnit(shape?.height, 0.16),
+        text: trimText(String(shape?.text || ''), 180),
+        fill_color: normalizeHex(shape?.fill_color, kind === 'image_placeholder' ? 'F6EFE7' : 'FFF7EE'),
+        line_color: normalizeHex(shape?.line_color, 'DCAE80'),
+        font_color: normalizeHex(shape?.font_color, '71472A'),
+        font_size: normalizeNumber(shape?.font_size, 13, 9, 28),
+        fill_transparency: normalizeNumber(shape?.fill_transparency, kind === 'text' ? 100 : 0, 0, 100),
+        line_transparency: normalizeNumber(shape?.line_transparency, kind === 'text' ? 100 : 0, 0, 100),
+      }
+    })
+    .filter((shape) => shape.width > 0.02 && shape.height > 0.02)
+    .slice(0, 4)
+}
+
+function normalizeUnit(value, fallback) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return Math.max(0, Math.min(1, number))
+}
+
+function normalizeNumber(value, fallback, min, max) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return Math.max(min, Math.min(max, number))
+}
+
+function normalizeHex(value, fallback) {
+  const cleaned = String(value || '').replace('#', '').trim().toUpperCase()
+  return /^[0-9A-F]{6}$/.test(cleaned) ? cleaned : fallback
 }
 
 export function templateFillPlanToPptPlan(plan, fallbackTitle = 'Moonwalk PPT') {
