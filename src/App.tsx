@@ -12,6 +12,7 @@ import {
   Sparkles,
   UploadCloud,
   XCircle,
+  X,
 } from 'lucide-react'
 import './App.css'
 
@@ -222,6 +223,7 @@ type PptSessionResponse = {
     templateTotal: number
     contentHit: boolean
     masterHit: boolean
+    templateFillLibraryHit?: boolean
   } | null
   qualityCheck?: {
     score: number
@@ -286,7 +288,8 @@ type PptJobResponse = {
   jobId: string
   sessionId: string
   type: 'analyze' | 'generate' | 'revise'
-  status: 'queued' | 'running' | 'completed' | 'failed'
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  cancelled?: boolean
   message: string
   error: string
   result: PptSessionResponse | null
@@ -371,6 +374,8 @@ function App() {
   const [isGeneratingPpt, setIsGeneratingPpt] = useState(false)
   const [isRevisingPpt, setIsRevisingPpt] = useState(false)
   const [pptProgress, setPptProgress] = useState<PptProgress>(null)
+  const [activePptJobId, setActivePptJobId] = useState('')
+  const activePptJobIdRef = useRef('')
   const [error, setError] = useState('')
   const [missingIds, setMissingIds] = useState<string[]>([])
 
@@ -610,6 +615,7 @@ function App() {
     setIsGeneratingPpt(false)
     setIsRevisingPpt(false)
     setPptProgress(null)
+    setCurrentPptJobId('')
   }
 
   function backToUploadFromPpt() {
@@ -634,6 +640,7 @@ function App() {
     setError('')
     setIsAnalyzingPpt(true)
     setPptProgress({ label: '模板分析', detail: '正在上传模板文件并创建分析任务。' })
+    let jobId = ''
     try {
       const formData = new FormData()
       pptTemplates.forEach((file) => formData.append('templates', file))
@@ -650,19 +657,26 @@ function App() {
         body: formData,
       })
       const job = await parseApiResponse<PptJobResponse>(response)
+      jobId = job.jobId
+      setCurrentPptJobId(job.jobId)
       setPptProgress({ label: '模板分析', detail: job.message })
       const data = await waitForPptJob(job.jobId, {
         fallbackError: '模板分析失败，请重试。',
         timeoutError: '模板分析时间过长，请稍后刷新或重新上传。',
-        onProgress: (nextJob) => setPptProgress({ label: '模板分析', detail: nextJob.message }),
+        onProgress: (nextJob) => {
+          if (isCurrentPptJob(nextJob.jobId)) setPptProgress({ label: '模板分析', detail: nextJob.message })
+        },
       })
       setPptSession(data)
       setPptMainTemplateId(data.selectedMainTemplateId || data.templates[0]?.id || '')
     } catch (pptError) {
-      setError(getErrorText(pptError))
+      if (isCurrentPptJob(jobId)) setError(getErrorText(pptError))
     } finally {
-      setIsAnalyzingPpt(false)
-      setPptProgress(null)
+      if (isCurrentPptJob(jobId)) {
+        setIsAnalyzingPpt(false)
+        setPptProgress(null)
+        setCurrentPptJobId('')
+      }
     }
   }
 
@@ -680,6 +694,7 @@ function App() {
     setError('')
     setIsGeneratingPpt(true)
     setPptProgress({ label: '生成初稿', detail: '正在创建 PPT 生成任务。' })
+    let jobId = ''
     try {
       const job = await fetchJson<PptJobResponse>('/api/ppt/generate', {
         method: 'POST',
@@ -696,21 +711,28 @@ function App() {
           requirements: pptRequirements,
         }),
       })
+      jobId = job.jobId
+      setCurrentPptJobId(job.jobId)
       setPptProgress({ label: '生成初稿', detail: job.message })
       const data = await waitForPptJob(job.jobId, {
         fallbackError: 'PPT 生成失败，请重试。',
         timeoutError: 'PPT 生成时间过长，请稍后刷新或重新生成。',
-        onProgress: (nextJob) => setPptProgress({ label: '生成初稿', detail: nextJob.message }),
+        onProgress: (nextJob) => {
+          if (isCurrentPptJob(nextJob.jobId)) setPptProgress({ label: '生成初稿', detail: nextJob.message })
+        },
       })
       setPptSession(data)
       setPptSlideComments({})
       setStep('pptPreview')
       window.scrollTo({ top: 0, behavior: 'smooth' })
     } catch (pptError) {
-      setError(getErrorText(pptError))
+      if (isCurrentPptJob(jobId)) setError(getErrorText(pptError))
     } finally {
-      setIsGeneratingPpt(false)
-      setPptProgress(null)
+      if (isCurrentPptJob(jobId)) {
+        setIsGeneratingPpt(false)
+        setPptProgress(null)
+        setCurrentPptJobId('')
+      }
     }
   }
 
@@ -727,6 +749,7 @@ function App() {
     setError('')
     setIsRevisingPpt(true)
     setPptProgress({ label: '局部修改', detail: '正在创建修改任务。' })
+    let jobId = ''
     try {
       const job = await fetchJson<PptJobResponse>('/api/ppt/revise', {
         method: 'POST',
@@ -737,21 +760,53 @@ function App() {
           slideComments,
         }),
       })
+      jobId = job.jobId
+      setCurrentPptJobId(job.jobId)
       setPptProgress({ label: '局部修改', detail: job.message })
       const data = await waitForPptJob(job.jobId, {
         fallbackError: 'PPT 修改失败，请重试。',
         timeoutError: 'PPT 修改时间过长，请稍后刷新或重新生成。',
-        onProgress: (nextJob) => setPptProgress({ label: '局部修改', detail: nextJob.message }),
+        onProgress: (nextJob) => {
+          if (isCurrentPptJob(nextJob.jobId)) setPptProgress({ label: '局部修改', detail: nextJob.message })
+        },
       })
       setPptSession(data)
       setPptSlideComments({})
       window.scrollTo({ top: 0, behavior: 'smooth' })
     } catch (pptError) {
-      setError(getErrorText(pptError))
+      if (isCurrentPptJob(jobId)) setError(getErrorText(pptError))
     } finally {
+      if (isCurrentPptJob(jobId)) {
+        setIsRevisingPpt(false)
+        setPptProgress(null)
+        setCurrentPptJobId('')
+      }
+    }
+  }
+
+  async function handleCancelPptJob() {
+    if (!activePptJobId) return
+    try {
+      await fetchJson<PptJobResponse>(`/api/ppt/jobs/${activePptJobId}/cancel`, { method: 'POST' })
+      setError('当前 PPT 任务已取消。')
+    } catch (cancelError) {
+      setError(getErrorText(cancelError))
+    } finally {
+      setIsAnalyzingPpt(false)
+      setIsGeneratingPpt(false)
       setIsRevisingPpt(false)
       setPptProgress(null)
+      setCurrentPptJobId('')
     }
+  }
+
+  function setCurrentPptJobId(jobId: string) {
+    activePptJobIdRef.current = jobId
+    setActivePptJobId(jobId)
+  }
+
+  function isCurrentPptJob(jobId: string) {
+    return !jobId || activePptJobIdRef.current === jobId
   }
 
   function backToSummaryFromResult() {
@@ -876,9 +931,11 @@ function App() {
           isAnalyzing={isAnalyzingPpt}
           isGenerating={isGeneratingPpt}
           progress={pptProgress}
+          activeJobId={activePptJobId}
           error={error}
           onAnalyze={handleAnalyzePptTemplates}
           onGenerate={handleGeneratePpt}
+          onCancelJob={handleCancelPptJob}
           onBack={backToUploadFromPpt}
           onSwitchToDeepSeek={switchPptToDeepSeek}
         />
@@ -891,9 +948,11 @@ function App() {
           setSlideComments={setPptSlideComments}
           isRevising={isRevisingPpt}
           progress={pptProgress}
+          activeJobId={activePptJobId}
           error={error}
           lockedAiProvider={lockedAiProvider}
           onRevise={handleRevisePpt}
+          onCancelJob={handleCancelPptJob}
           onFinal={() => {
             setError('')
             setStep('pptFinal')
@@ -2041,9 +2100,11 @@ function PptSetupView({
   isAnalyzing,
   isGenerating,
   progress,
+  activeJobId,
   error,
   onAnalyze,
   onGenerate,
+  onCancelJob,
   onBack,
   onSwitchToDeepSeek,
 }: {
@@ -2073,9 +2134,11 @@ function PptSetupView({
   isAnalyzing: boolean
   isGenerating: boolean
   progress: PptProgress
+  activeJobId: string
   error: string
   onAnalyze: (event: FormEvent) => void
   onGenerate: (event?: FormEvent) => void
+  onCancelJob: () => void
   onBack: () => void
   onSwitchToDeepSeek: () => void
 }) {
@@ -2228,7 +2291,7 @@ function PptSetupView({
             {isAnalyzing ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
             {isAnalyzing ? '正在分析模板' : '分析模板'}
           </button>
-          {isAnalyzing && progress && <PptProgressNotice progress={progress} />}
+          {isAnalyzing && progress && <PptProgressNotice progress={progress} canCancel={Boolean(activeJobId)} onCancel={onCancelJob} />}
           {session?.cacheSummary && (
             <div className="ppt-cache-summary">
               <CheckCircle2 size={17} />
@@ -2301,7 +2364,7 @@ function PptSetupView({
             {isGenerating ? <Loader2 className="spin" size={18} /> : <ChevronRight size={18} />}
             {isGenerating ? '正在生成，可能需要几分钟' : '生成 PPT 初稿'}
           </button>
-          {isGenerating && progress && <PptProgressNotice progress={progress} />}
+          {isGenerating && progress && <PptProgressNotice progress={progress} canCancel={Boolean(activeJobId)} onCancel={onCancelJob} />}
 
           {error && (
             <ErrorNotice
@@ -2358,9 +2421,11 @@ function PptPreviewView({
   setSlideComments,
   isRevising,
   progress,
+  activeJobId,
   error,
   lockedAiProvider,
   onRevise,
+  onCancelJob,
   onFinal,
   onBack,
   onSwitchToDeepSeek,
@@ -2370,9 +2435,11 @@ function PptPreviewView({
   setSlideComments: (comments: PptSlideComments) => void
   isRevising: boolean
   progress: PptProgress
+  activeJobId: string
   error: string
   lockedAiProvider: AiProviderId
   onRevise: () => void
+  onCancelJob: () => void
   onFinal: () => void
   onBack: () => void
   onSwitchToDeepSeek: () => void
@@ -2414,7 +2481,7 @@ function PptPreviewView({
           onAction={lockedAiProvider === 'openai' ? onSwitchToDeepSeek : undefined}
         />
       )}
-      {isRevising && progress && <PptProgressNotice progress={progress} />}
+      {isRevising && progress && <PptProgressNotice progress={progress} canCancel={Boolean(activeJobId)} onCancel={onCancelJob} />}
       <PptQualityPanel session={session} />
 
       <section className="ppt-slide-list">
@@ -2612,7 +2679,15 @@ function ErrorNotice({
   )
 }
 
-function PptProgressNotice({ progress }: { progress: PptProgress }) {
+function PptProgressNotice({
+  progress,
+  canCancel = false,
+  onCancel,
+}: {
+  progress: PptProgress
+  canCancel?: boolean
+  onCancel?: () => void
+}) {
   if (!progress) return null
   return (
     <div className="ppt-progress-notice">
@@ -2621,6 +2696,12 @@ function PptProgressNotice({ progress }: { progress: PptProgress }) {
         <strong>{progress.label}</strong>
         <span>{progress.detail}</span>
       </div>
+      {canCancel && onCancel && (
+        <button type="button" className="cancel-job-button" onClick={onCancel}>
+          <X size={15} />
+          取消任务
+        </button>
+      )}
     </div>
   )
 }
@@ -2655,6 +2736,9 @@ async function waitForPptJob(
     const job = await fetchJson<PptJobResponse>(`/api/ppt/jobs/${jobId}`)
     options.onProgress?.(job)
     if (job.status === 'completed' && job.result) return job.result
+    if (job.status === 'cancelled') {
+      throw new Error('任务已取消。')
+    }
     if (job.status === 'failed') {
       throw new Error(job.error || options.fallbackError || 'PPT 生成失败，请重试。')
     }
@@ -2694,6 +2778,7 @@ function formatPptCacheSummary(cacheSummary: NonNullable<PptSessionResponse['cac
   }
   if (cacheSummary.contentHit) parts.push('内容文件缓存命中')
   if (cacheSummary.masterHit) parts.push('母版缓存命中')
+  if (cacheSummary.templateFillLibraryHit) parts.push('PPT 版式库缓存命中')
   return `${parts.join(' · ')}，下次上传相同文件会更快。`
 }
 

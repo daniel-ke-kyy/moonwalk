@@ -4,7 +4,7 @@ import cors from 'cors'
 import multer from 'multer'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,6 +47,7 @@ import {
   analyzeTemplateFiles,
   buildMasterContext,
   buildTemplateContext,
+  configurePptTemplateCache,
   extractContentFileText,
 } from './pptTemplateProcessor.js'
 import {
@@ -65,11 +66,14 @@ const port = Number(process.env.PORT || 5174)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const distDir = path.resolve(__dirname, '../dist')
 const uploadRoot = await mkdtemp(path.join(os.tmpdir(), 'material-quiz-uploads-'))
+const pptCacheRoot = process.env.PPT_CACHE_DIR || path.join(os.tmpdir(), 'moonwalk-ppt-cache')
 const sessions = new Map()
 const pptSessions = new Map()
 const pptJobs = new Map()
 const pptTemplateFillLibraryCache = new Map()
 const maxPptTemplateFillLibraryCacheEntries = 20
+const maxPptTemplateFillLibraryDiskEntries = 80
+const pptCacheTtlMs = Number(process.env.PPT_CACHE_TTL_MS || 6 * 60 * 60 * 1000)
 const accessPassword = String(process.env.ACCESS_PASSWORD || '').trim()
 const accessAuthEnabled = Boolean(accessPassword)
 const accessCookieName = 'moonwalk_access'
@@ -80,6 +84,12 @@ const upload = multer({
 })
 
 let pptRenderingStatusCache = null
+
+await configurePptTemplateCache(pptCacheRoot)
+await mkdir(getPptTemplateFillLibraryDiskRoot(), { recursive: true })
+await cleanupPptTemplateFillLibraryDiskCache().catch((error) => {
+  console.warn(`PPT 填充版式库临时缓存清理失败：${error.message}`)
+})
 
 app.use(cors({ origin: true, credentials: true }))
 app.use(express.json({ limit: '2mb' }))
@@ -225,7 +235,7 @@ app.post('/api/ppt/analyze', upload.fields([
     await mkdir(sessionDir, { recursive: true })
 
     const job = createPptJob(sessionId, 'analyze')
-    runPptJob(job, async ({ update }) => {
+    runPptJob(job, async ({ update, assertNotCancelled }) => {
       try {
         return await analyzePptUploadSession({
           aiProvider,
@@ -234,6 +244,7 @@ app.post('/api/ppt/analyze', upload.fields([
           sessionId,
           sessionDir,
           update,
+          assertNotCancelled,
         })
       } catch (error) {
         await cleanupUploadedFiles(req.files)
@@ -258,9 +269,9 @@ app.post('/api/ppt/generate', async (req, res) => {
 
     applyPptSettings(session, settings)
     const job = createPptJob(session.id, 'generate')
-    runPptJob(job, async ({ update }) => {
+    runPptJob(job, async ({ update, assertNotCancelled }) => {
       update('正在整理内容、需求和模板规则。')
-      await generatePptSessionOutput(session, aiProvider, update)
+      await generatePptSessionOutput(session, aiProvider, update, assertNotCancelled)
       return serializePptSession(session)
     })
     res.json(serializePptJob(job))
@@ -272,6 +283,25 @@ app.post('/api/ppt/generate', async (req, res) => {
 app.get('/api/ppt/jobs/:jobId', (req, res) => {
   try {
     const job = getPptJob(req.params.jobId)
+    res.json(serializePptJob(job))
+  } catch (error) {
+    res.status(404).json({ error: toUserError(error) })
+  }
+})
+
+app.post('/api/ppt/jobs/:jobId/cancel', (req, res) => {
+  try {
+    const job = getPptJob(req.params.jobId)
+    if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+      res.json(serializePptJob(job))
+      return
+    }
+    updatePptJob(job, {
+      status: 'cancelled',
+      cancelled: true,
+      message: '任务已取消。',
+      error: '任务已取消。',
+    })
     res.json(serializePptJob(job))
   } catch (error) {
     res.status(404).json({ error: toUserError(error) })
@@ -290,11 +320,11 @@ app.post('/api/ppt/revise', async (req, res) => {
     }
 
     const job = createPptJob(session.id, 'revise')
-    runPptJob(job, async ({ update }) => {
+    runPptJob(job, async ({ update, assertNotCancelled }) => {
       update('正在读取每页修改意见。')
-      const plan = await revisePptSessionPlan(session, aiProvider, settings.slideComments, update)
+      const plan = await revisePptSessionPlan(session, aiProvider, settings.slideComments, update, assertNotCancelled)
       update('局部修改已合并，正在重新渲染 PPT。')
-      await renderRevisedPptSessionOutput(session, aiProvider, plan, settings.slideComments, update)
+      await renderRevisedPptSessionOutput(session, aiProvider, plan, settings.slideComments, update, assertNotCancelled)
       return serializePptSession(session)
     })
     res.json(serializePptJob(job))
@@ -323,21 +353,25 @@ app.get('/api/ppt/:sessionId/download/pdf', (req, res) => {
   }
 })
 
-async function analyzePptUploadSession({ aiProvider, files, body, sessionId, sessionDir, update }) {
+async function analyzePptUploadSession({ aiProvider, files, body, sessionId, sessionDir, update, assertNotCancelled = () => {} }) {
   const templateFiles = Array.isArray(files.templates) ? files.templates : []
   const contentFile = Array.isArray(files.contentFile) ? files.contentFile[0] : null
   const masterFile = Array.isArray(files.master) ? files.master[0] : null
 
+  assertNotCancelled()
   update('正在分析模板文件并生成预览。')
   const templates = await analyzeTemplateFiles(templateFiles, sessionDir)
   const cachedTemplateCount = templates.filter((template) => template.cacheHit).length
 
+  assertNotCancelled()
   update(contentFile ? '正在读取 PPT 内容文件。' : '正在整理 PPT 文本内容。')
   const contentFileResult = await extractContentFileText(contentFile)
 
+  assertNotCancelled()
   update(masterFile ? '正在识别幻灯片母版结构。' : '正在整理模板生成设置。')
   const master = await analyzeMasterFile(masterFile, sessionDir)
 
+  assertNotCancelled()
   const session = {
     id: sessionId,
     aiProviderId: aiProvider.id,
@@ -526,6 +560,7 @@ function createPptJob(sessionId, type) {
     sessionId,
     type,
     status: 'queued',
+    cancelled: false,
     message: getPptJobMessage(type, 'queued'),
     result: null,
     error: '',
@@ -539,15 +574,29 @@ function createPptJob(sessionId, type) {
 function runPptJob(job, handler) {
   queueMicrotask(async () => {
     try {
+      assertPptJobNotCancelled(job)
       updatePptJob(job, { status: 'running', message: getPptJobMessage(job.type, 'running') })
-      const update = (message) => updatePptJob(job, { status: 'running', message })
-      const result = await handler({ update })
+      const update = (message) => {
+        assertPptJobNotCancelled(job)
+        updatePptJob(job, { status: 'running', message })
+      }
+      const result = await handler({ update, isCancelled: () => job.cancelled, assertNotCancelled: () => assertPptJobNotCancelled(job) })
+      assertPptJobNotCancelled(job)
       updatePptJob(job, {
         status: 'completed',
         message: getPptJobMessage(job.type, 'completed'),
         result,
       })
     } catch (error) {
+      if (isPptJobCancelledError(error) || job.cancelled) {
+        updatePptJob(job, {
+          status: 'cancelled',
+          cancelled: true,
+          message: '任务已取消。',
+          error: '任务已取消。',
+        })
+        return
+      }
       updatePptJob(job, {
         status: 'failed',
         message: getPptJobMessage(job.type, 'failed'),
@@ -577,12 +626,36 @@ function getPptJobMessage(type, status) {
       completed: 'PPT 已重新生成。',
       failed: 'PPT 修改失败。',
     },
+    cancelled: {
+      queued: '任务已取消。',
+      running: '任务已取消。',
+      completed: '任务已取消。',
+      failed: '任务已取消。',
+    },
   }
   return messages[type]?.[status] || '任务正在处理。'
 }
 
 function updatePptJob(job, patch) {
+  if (job.status === 'cancelled' && patch.status !== 'cancelled') return
   Object.assign(job, patch, { updatedAt: new Date().toISOString() })
+}
+
+function assertPptJobNotCancelled(job) {
+  if (job.cancelled || job.status === 'cancelled') {
+    throw new PptJobCancelledError()
+  }
+}
+
+function isPptJobCancelledError(error) {
+  return error instanceof PptJobCancelledError || error?.name === 'PptJobCancelledError'
+}
+
+class PptJobCancelledError extends Error {
+  constructor() {
+    super('任务已取消。')
+    this.name = 'PptJobCancelledError'
+  }
 }
 
 function serializePptJob(job) {
@@ -591,6 +664,7 @@ function serializePptJob(job) {
     sessionId: job.sessionId,
     type: job.type,
     status: job.status,
+    cancelled: Boolean(job.cancelled),
     message: job.message,
     error: job.error,
     result: job.result,
@@ -796,30 +870,37 @@ function buildPptAiContext(session) {
   }
 }
 
-async function generatePptSessionOutput(session, aiProvider, update = () => {}) {
+async function generatePptSessionOutput(session, aiProvider, update = () => {}, assertNotCancelled = () => {}) {
+  assertNotCancelled()
   const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
   const canUseTemplateFill = mainTemplate?.extension === '.pptx' && !session.master
   if (canUseTemplateFill && typeof aiProvider.module.generatePptTemplateFillPlan === 'function') {
     try {
+      assertNotCancelled()
       update('正在尝试使用模板填充引擎复用原 PPT 结构。')
-      await renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update)
-      await runPptQualityCheck(session, aiProvider, update)
+      await renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update, {}, assertNotCancelled)
+      assertNotCancelled()
+      await runPptQualityCheck(session, aiProvider, update, assertNotCancelled)
       return
     } catch (error) {
+      if (isPptJobCancelledError(error)) throw error
       console.warn(`PPT Master template-fill 失败，回退到原生成器：${toUserError(error)}`)
       session.templateFillFallbackReason = toUserError(error)
       update('模板填充不够稳定，正在切换到普通生成引擎。')
     }
   }
 
+  assertNotCancelled()
   update('正在让 AI 规划每页标题、层级和内容结构。')
   const plan = await aiProvider.module.generatePptPlan(buildPptAiContext(session))
+  assertNotCancelled()
   update('AI 已返回页面方案，正在生成 PPTX。')
-  await renderPptSessionOutput(session, plan, { engine: 'fallback', update })
-  await runPptQualityCheck(session, aiProvider, update)
+  await renderPptSessionOutput(session, plan, { engine: 'fallback', update, assertNotCancelled })
+  assertNotCancelled()
+  await runPptQualityCheck(session, aiProvider, update, assertNotCancelled)
 }
 
-async function revisePptSessionPlan(session, aiProvider, slideComments, update = () => {}) {
+async function revisePptSessionPlan(session, aiProvider, slideComments, update = () => {}, assertNotCancelled = () => {}) {
   const context = {
     ...buildPptAiContext(session),
     currentPlan: session.plan,
@@ -831,8 +912,10 @@ async function revisePptSessionPlan(session, aiProvider, slideComments, update =
     })),
   }
   if (typeof aiProvider.module.revisePptPlanPartial === 'function') {
+    assertNotCancelled()
     update(`正在局部修改 ${slideComments.length} 页，其余页面保持不变。`)
     const plan = await aiProvider.module.revisePptPlanPartial(context)
+    assertNotCancelled()
     session.revisionSummary = {
       mode: 'partial',
       revisedSlides: slideComments.map((item) => item.slideNumber),
@@ -842,8 +925,10 @@ async function revisePptSessionPlan(session, aiProvider, slideComments, update =
     return plan
   }
 
+  assertNotCancelled()
   update('当前模型暂不支持局部修改，正在使用整套修改方案。')
   const plan = await aiProvider.module.revisePptPlan(context)
+  assertNotCancelled()
   session.revisionSummary = {
     mode: 'full',
     revisedSlides: slideComments.map((item) => item.slideNumber),
@@ -853,7 +938,7 @@ async function revisePptSessionPlan(session, aiProvider, slideComments, update =
   return plan
 }
 
-async function renderRevisedPptSessionOutput(session, aiProvider, plan, slideComments, update = () => {}) {
+async function renderRevisedPptSessionOutput(session, aiProvider, plan, slideComments, update = () => {}, assertNotCancelled = () => {}) {
   const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
   const canUseTemplateFillRevision = session.output?.engine === 'template-fill'
     && session.templateFillPlan
@@ -863,25 +948,29 @@ async function renderRevisedPptSessionOutput(session, aiProvider, plan, slideCom
 
   if (canUseTemplateFillRevision) {
     try {
+      assertNotCancelled()
       update('正在沿用模板填充引擎，只更新有修改意见的页面。')
       await renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update, {
         baseFillPlan: session.templateFillPlan,
         targetSlideNumbers: slideComments.map((item) => item.slideNumber),
         planOverride: plan,
-      })
-      await runPptQualityCheck(session, aiProvider, update)
+      }, assertNotCancelled)
+      assertNotCancelled()
+      await runPptQualityCheck(session, aiProvider, update, assertNotCancelled)
       return
     } catch (error) {
+      if (isPptJobCancelledError(error)) throw error
       console.warn(`PPT 局部模板填充修改失败，回退到普通渲染：${toUserError(error)}`)
       update('模板填充局部修改不够稳定，正在回退到普通渲染。')
     }
   }
 
-  await renderPptSessionOutput(session, plan, { engine: 'fallback', update })
-  await runPptQualityCheck(session, aiProvider, update)
+  await renderPptSessionOutput(session, plan, { engine: 'fallback', update, assertNotCancelled })
+  assertNotCancelled()
+  await runPptQualityCheck(session, aiProvider, update, assertNotCancelled)
 }
 
-async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update = () => {}, options = {}) {
+async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update = () => {}, options = {}, assertNotCancelled = () => {}) {
   const versionId = nanoid(8)
   const outputDir = path.join(session.sessionDir, 'outputs', versionId)
   const analysisDir = path.join(outputDir, 'template-fill')
@@ -892,8 +981,10 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   const checkPath = path.join(analysisDir, 'check_report.json')
   const pptxPath = path.join(outputDir, 'moonwalk-template-filled.pptx')
 
+  assertNotCancelled()
   update('正在读取模板中的页面、文本框和版式元素。')
-  const library = await loadTemplateFillLibrary(mainTemplate, libraryPath)
+  const { library, cacheHit: templateFillLibraryCacheHit } = await loadTemplateFillLibrary(mainTemplate, libraryPath)
+  assertNotCancelled()
   const templateFillLibrary = pruneSlideLibraryForAi(library)
   let fillPlan = options.baseFillPlan ? clonePlain(options.baseFillPlan) : null
   if (fillPlan && options.planOverride) {
@@ -906,12 +997,14 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
       templateFillLibraryRaw: library,
     })
   }
+  assertNotCancelled()
   const replacementCount = fillPlan.slides.reduce((total, slide) => total + slide.replacements.length, 0)
   if (replacementCount < Math.max(3, Math.ceil(session.slideCount * 1.5))) {
     throw new Error('模板填充计划有效替换内容太少，已回退到普通生成。')
   }
   await writeTemplateFillPlan(planPath, fillPlan)
 
+  assertNotCancelled()
   update('正在校验填充方案，避免无效占位和明显溢出。')
   const checkReport = await checkTemplateFillPlan(libraryPath, planPath, checkPath)
   const checkSummary = summarizeTemplateFillCheck(checkReport)
@@ -922,9 +1015,11 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
     throw new Error(`模板填充计划有 ${checkSummary.warn} 个容量警告，已回退到普通生成。`)
   }
 
+  assertNotCancelled()
   update('正在应用填充方案生成 PPTX。')
   const rawGeneratedPptxPath = await applyTemplateFillPlan(mainTemplate.path, planPath, pptxPath)
   const generatedPptxPath = await normalizePptxForRendering(rawGeneratedPptxPath)
+  assertNotCancelled()
   const plan = templateFillPlanToPptPlan(fillPlan, mainTemplate.originalName || 'Moonwalk PPT')
   let pdfPath = null
   let previewPaths = []
@@ -933,19 +1028,27 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   try {
     update('正在把 PPTX 转换为预览图和 PDF。')
     const rendered = await renderDocumentToPreviews(generatedPptxPath, previewDir, { prefix: 'slide', dpi: 128 })
+    assertNotCancelled()
     pdfPath = rendered.pdfPath
     previewPaths = rendered.previewPaths
   } catch (error) {
+    if (isPptJobCancelledError(error)) throw error
     previewSource = 'fallback'
     previewFallbackReason = toUserError(error)
     console.warn(`PPT Master template-fill PPTX 预览转换失败，改用普通生成器生成预览：${previewFallbackReason}`)
     update('PPTX 已生成，预览转换失败，正在生成兜底预览。')
     const fallbackPreview = await renderFallbackPreviewForTemplateFill(session, plan, outputDir, mainTemplate)
+    assertNotCancelled()
     previewPaths = fallbackPreview.previewPaths
   }
 
+  assertNotCancelled()
   session.plan = plan
   session.templateFillPlan = fillPlan
+  session.cacheSummary = {
+    ...(session.cacheSummary || {}),
+    templateFillLibraryHit: templateFillLibraryCacheHit,
+  }
   session.output = {
     versionId,
     engine: 'template-fill',
@@ -968,13 +1071,26 @@ async function loadTemplateFillLibrary(template, libraryPath) {
   const cacheKey = template?.cacheKey || `${template?.extension || 'pptx'}:${template?.size || 0}:${template?.originalName || ''}`
   const cached = pptTemplateFillLibraryCache.get(cacheKey)
   if (cached) {
-    await writeFile(libraryPath, `${JSON.stringify(cached, null, 2)}\n`, 'utf8')
-    return clonePlain(cached)
+    const library = withTemplateFillLibrarySource(cached, template.path)
+    await writeFile(libraryPath, `${JSON.stringify(library, null, 2)}\n`, 'utf8')
+    return { library: clonePlain(library), cacheHit: true }
   }
 
-  const library = await analyzeTemplateFillLibrary(template.path, libraryPath)
-  rememberPptTemplateFillLibrary(cacheKey, library)
-  return library
+  const diskCached = await readPptTemplateFillLibraryDiskCache(cacheKey)
+  if (diskCached) {
+    rememberPptTemplateFillLibrary(cacheKey, diskCached)
+    const library = withTemplateFillLibrarySource(diskCached, template.path)
+    await writeFile(libraryPath, `${JSON.stringify(library, null, 2)}\n`, 'utf8')
+    return { library: clonePlain(library), cacheHit: true }
+  }
+
+  const rawLibrary = await analyzeTemplateFillLibrary(template.path, libraryPath)
+  const cachedLibrary = normalizeTemplateFillLibraryForCache(rawLibrary)
+  rememberPptTemplateFillLibrary(cacheKey, cachedLibrary)
+  await writePptTemplateFillLibraryDiskCache(cacheKey, cachedLibrary).catch((error) => {
+    console.warn(`PPT 填充版式库临时缓存写入失败：${error.message}`)
+  })
+  return { library: rawLibrary, cacheHit: false }
 }
 
 function rememberPptTemplateFillLibrary(key, library) {
@@ -985,6 +1101,85 @@ function rememberPptTemplateFillLibrary(key, library) {
     const oldestKey = pptTemplateFillLibraryCache.keys().next().value
     pptTemplateFillLibraryCache.delete(oldestKey)
   }
+}
+
+function normalizeTemplateFillLibraryForCache(library) {
+  return {
+    ...clonePlain(library),
+    source_pptx: '',
+  }
+}
+
+function withTemplateFillLibrarySource(library, sourcePath) {
+  return {
+    ...clonePlain(library),
+    source_pptx: sourcePath || '',
+  }
+}
+
+async function readPptTemplateFillLibraryDiskCache(cacheKey) {
+  if (!cacheKey) return null
+  const filePath = getPptTemplateFillLibraryDiskPath(cacheKey)
+  try {
+    const cached = JSON.parse(await readFile(filePath, 'utf8'))
+    if (Date.now() - Number(cached.cachedAt || 0) > pptCacheTtlMs) {
+      await rm(filePath, { force: true }).catch(() => {})
+      return null
+    }
+    return cached.library || null
+  } catch {
+    return null
+  }
+}
+
+async function writePptTemplateFillLibraryDiskCache(cacheKey, library) {
+  if (!cacheKey || !library) return
+  await mkdir(getPptTemplateFillLibraryDiskRoot(), { recursive: true })
+  await writeFile(
+    getPptTemplateFillLibraryDiskPath(cacheKey),
+    `${JSON.stringify({ cachedAt: Date.now(), library: clonePlain(library) }, null, 2)}\n`,
+    'utf8',
+  )
+}
+
+function getPptTemplateFillLibraryDiskRoot() {
+  return path.join(pptCacheRoot, 'template-fill-library')
+}
+
+function getPptTemplateFillLibraryDiskPath(cacheKey) {
+  return path.join(getPptTemplateFillLibraryDiskRoot(), `${hashPptCacheKey(cacheKey)}.json`)
+}
+
+function hashPptCacheKey(cacheKey) {
+  return createHmac('sha256', 'moonwalk-ppt-cache-v1').update(String(cacheKey || '')).digest('hex')
+}
+
+async function cleanupPptTemplateFillLibraryDiskCache() {
+  const root = getPptTemplateFillLibraryDiskRoot()
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => [])
+  const files = []
+  for (const entry of entries) {
+    if (!entry.isFile()) continue
+    const fullPath = path.join(root, entry.name)
+    const info = await stat(fullPath).catch(() => null)
+    if (info) files.push({ path: fullPath, mtimeMs: info.mtimeMs })
+  }
+
+  const now = Date.now()
+  await Promise.all(
+    files
+      .filter((item) => now - item.mtimeMs > pptCacheTtlMs)
+      .map((item) => rm(item.path, { force: true }).catch(() => {})),
+  )
+
+  const fresh = files
+    .filter((item) => now - item.mtimeMs <= pptCacheTtlMs)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+  await Promise.all(
+    fresh
+      .slice(maxPptTemplateFillLibraryDiskEntries)
+      .map((item) => rm(item.path, { force: true }).catch(() => {})),
+  )
 }
 
 async function renderFallbackPreviewForTemplateFill(session, plan, outputDir, mainTemplate) {
@@ -1017,6 +1212,7 @@ async function renderPptSessionOutput(session, plan, options = {}) {
   const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
   const templateAssets = mainTemplate?.extension === '.pptx' ? mainTemplate.assets : []
 
+  options.assertNotCancelled?.()
   options.update?.('正在写入 PPTX 文件。')
   await createPptxFromPlan({
     plan,
@@ -1033,18 +1229,22 @@ async function renderPptSessionOutput(session, plan, options = {}) {
         : null,
     },
   })
+  options.assertNotCancelled?.()
 
   let pdfPath = null
   let previewPaths = []
   try {
     options.update?.('正在把 PPTX 转换为预览图和 PDF。')
     const rendered = await renderDocumentToPreviews(pptxPath, previewDir, { prefix: 'slide', dpi: 128 })
+    options.assertNotCancelled?.()
     pdfPath = rendered.pdfPath
     previewPaths = rendered.previewPaths
   } catch (error) {
+    if (isPptJobCancelledError(error)) throw error
     throw new Error(`PPTX 已生成，但预览转换失败：${toUserError(error)}`)
   }
 
+  options.assertNotCancelled?.()
   session.plan = plan
   session.templateFillPlan = null
   session.output = {
@@ -1057,11 +1257,12 @@ async function renderPptSessionOutput(session, plan, options = {}) {
   }
 }
 
-async function runPptQualityCheck(session, aiProvider, update = () => {}) {
+async function runPptQualityCheck(session, aiProvider, update = () => {}, assertNotCancelled = () => {}) {
   if (typeof aiProvider.module.checkPptQuality !== 'function' || !session.plan) {
     session.qualityCheck = null
     return
   }
+  assertNotCancelled()
   update('正在进行生成质量自检。')
   try {
     session.qualityCheck = await aiProvider.module.checkPptQuality({
@@ -1075,7 +1276,9 @@ async function runPptQualityCheck(session, aiProvider, update = () => {}) {
         templateFillCheck: session.output?.templateFill?.checkSummary || null,
       },
     })
+    assertNotCancelled()
   } catch (error) {
+    if (isPptJobCancelledError(error)) throw error
     console.warn(`PPT 质量自检失败：${toUserError(error)}`)
     session.qualityCheck = {
       score: 0,

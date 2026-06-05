@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import AdmZip from 'adm-zip'
 import { XMLParser } from 'fast-xml-parser'
@@ -28,6 +28,18 @@ const contentExtensions = new Set(['.txt', '.docx', '.pdf', '.pptx'])
 const templateAnalysisCache = new Map()
 const contentTextCache = new Map()
 const maxCacheEntries = 30
+const maxDiskCacheEntries = 80
+const cacheTtlMs = Number(process.env.PPT_CACHE_TTL_MS || 6 * 60 * 60 * 1000)
+let diskCacheRoot = null
+
+export async function configurePptTemplateCache(root) {
+  diskCacheRoot = root
+  await mkdir(getTemplateDiskCacheRoot(), { recursive: true })
+  await mkdir(getContentDiskCacheRoot(), { recursive: true })
+  await cleanupDiskCache().catch((error) => {
+    console.warn(`PPT 临时缓存清理失败：${error.message}`)
+  })
+}
 
 export async function analyzeTemplateFiles(files, sessionDir) {
   if (!files?.length) throw new Error('请至少上传 1 个模板文件。')
@@ -70,8 +82,9 @@ export async function extractContentFileText(file) {
   }
 
   const cacheKey = await getFileCacheKey(file, `content:${extension}`)
-  const cached = contentTextCache.get(cacheKey)
+  const cached = contentTextCache.get(cacheKey) || await readContentDiskCache(cacheKey)
   if (cached) {
+    rememberCacheEntry(contentTextCache, cacheKey, cached)
     return {
       text: cached.text,
       fileInfo: {
@@ -107,6 +120,7 @@ export async function extractContentFileText(file) {
     cacheHit: false,
   }
   rememberCacheEntry(contentTextCache, cacheKey, { text })
+  await writeContentDiskCache(cacheKey, { text })
   return result
 }
 
@@ -153,9 +167,13 @@ async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
   const directoryName = options.directoryName || 'templates'
   const previewLimit = options.previewLimit || 6
   const cacheKey = await getFileCacheKey(file, `template:${extension}:preview-${previewLimit}`)
-  const cached = templateAnalysisCache.get(cacheKey)
+  const renderDir = path.join(sessionDir, directoryName, id, 'preview')
+  const assetDir = path.join(sessionDir, directoryName, id, 'assets')
+  const cached = await readTemplateAnalysisCache(cacheKey)
   if (cached && cachedTemplateFilesExist(cached)) {
-    return rehydrateCachedTemplate(cached, file, {
+    await mkdir(assetDir, { recursive: true })
+    const copied = await copyCachedTemplateFiles(cached, renderDir, assetDir)
+    return rehydrateCachedTemplate(cached, file, copied, {
       id,
       originalName,
       role: options.role || (index === 0 ? 'main' : 'auxiliary'),
@@ -164,8 +182,6 @@ async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
   }
   if (cached) templateAnalysisCache.delete(cacheKey)
 
-  const renderDir = path.join(sessionDir, directoryName, id, 'preview')
-  const assetDir = path.join(sessionDir, directoryName, id, 'assets')
   await mkdir(assetDir, { recursive: true })
 
   const base = {
@@ -209,7 +225,7 @@ async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
       textSample: trimText(text, 1600),
       previewPaths: rendered.previewPaths.slice(0, previewLimit),
     }
-    rememberCacheEntry(templateAnalysisCache, cacheKey, result)
+    await rememberTemplateAnalysisCache(cacheKey, result)
     return result
   }
 
@@ -231,7 +247,7 @@ async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
     assets: style.assets.slice(0, 8),
     slideTexts: style.slideTexts,
   }
-  rememberCacheEntry(templateAnalysisCache, cacheKey, result)
+  await rememberTemplateAnalysisCache(cacheKey, result)
   return result
 }
 
@@ -250,6 +266,116 @@ function rememberCacheEntry(cache, key, value) {
   }
 }
 
+async function readTemplateAnalysisCache(cacheKey) {
+  const memoryHit = templateAnalysisCache.get(cacheKey)
+  if (memoryHit) return memoryHit
+  const diskHit = await readTemplateDiskCache(cacheKey)
+  if (diskHit) rememberCacheEntry(templateAnalysisCache, cacheKey, diskHit)
+  return diskHit
+}
+
+async function rememberTemplateAnalysisCache(cacheKey, result) {
+  const cached = await writeTemplateDiskCache(cacheKey, result).catch((error) => {
+    console.warn(`PPT 模板临时缓存写入失败：${error.message}`)
+    return result
+  })
+  rememberCacheEntry(templateAnalysisCache, cacheKey, cached)
+}
+
+async function readTemplateDiskCache(cacheKey) {
+  if (!diskCacheRoot) return null
+  const cacheDir = getTemplateDiskCacheDir(cacheKey)
+  const manifestPath = path.join(cacheDir, 'manifest.json')
+  try {
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    if (Date.now() - Number(manifest.cachedAt || 0) > cacheTtlMs) {
+      await rm(cacheDir, { recursive: true, force: true }).catch(() => {})
+      return null
+    }
+    return manifest
+  } catch {
+    return null
+  }
+}
+
+async function writeTemplateDiskCache(cacheKey, result) {
+  if (!diskCacheRoot) return clonePlain(result)
+  const cacheDir = getTemplateDiskCacheDir(cacheKey)
+  const previewDir = path.join(cacheDir, 'preview')
+  const assetDir = path.join(cacheDir, 'assets')
+  await rm(cacheDir, { recursive: true, force: true }).catch(() => {})
+  await mkdir(previewDir, { recursive: true })
+  await mkdir(assetDir, { recursive: true })
+
+  const cachedPreviewPaths = []
+  for (const filePath of result.previewPaths || []) {
+    if (!existsSync(filePath)) continue
+    const outputPath = path.join(previewDir, path.basename(filePath))
+    await copyFile(filePath, outputPath)
+    cachedPreviewPaths.push(outputPath)
+  }
+
+  const cachedAssets = []
+  for (const asset of result.assets || []) {
+    if (!asset?.path || !existsSync(asset.path)) continue
+    const outputPath = path.join(assetDir, asset.filename || path.basename(asset.path))
+    await copyFile(asset.path, outputPath)
+    cachedAssets.push({ ...asset, path: outputPath })
+  }
+
+  const manifest = {
+    ...clonePlain(result),
+    path: '',
+    previewPaths: cachedPreviewPaths,
+    assets: cachedAssets,
+    cachedAt: Date.now(),
+  }
+  await writeFile(path.join(cacheDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+  return manifest
+}
+
+async function readContentDiskCache(cacheKey) {
+  if (!diskCacheRoot) return null
+  const filePath = path.join(getContentDiskCacheRoot(), `${hashCacheKey(cacheKey)}.json`)
+  try {
+    const cached = JSON.parse(await readFile(filePath, 'utf8'))
+    if (Date.now() - Number(cached.cachedAt || 0) > cacheTtlMs) {
+      await rm(filePath, { force: true }).catch(() => {})
+      return null
+    }
+    return { text: String(cached.text || '') }
+  } catch {
+    return null
+  }
+}
+
+async function writeContentDiskCache(cacheKey, value) {
+  if (!diskCacheRoot) return
+  await mkdir(getContentDiskCacheRoot(), { recursive: true })
+  const filePath = path.join(getContentDiskCacheRoot(), `${hashCacheKey(cacheKey)}.json`)
+  await writeFile(filePath, `${JSON.stringify({ ...value, cachedAt: Date.now() }, null, 2)}\n`, 'utf8')
+}
+
+async function copyCachedTemplateFiles(cached, renderDir, assetDir) {
+  await mkdir(renderDir, { recursive: true })
+  await mkdir(assetDir, { recursive: true })
+  const previewPaths = []
+  for (const filePath of cached.previewPaths || []) {
+    if (!existsSync(filePath)) continue
+    const outputPath = path.join(renderDir, path.basename(filePath))
+    await copyFile(filePath, outputPath)
+    previewPaths.push(outputPath)
+  }
+  const assets = []
+  for (const asset of cached.assets || []) {
+    if (!asset?.path || !existsSync(asset.path)) continue
+    const outputPath = path.join(assetDir, asset.filename || path.basename(asset.path))
+    await copyFile(asset.path, outputPath)
+    assets.push({ ...asset, path: outputPath })
+  }
+  return { previewPaths, assets }
+}
+
 function cachedTemplateFilesExist(cached) {
   const files = [
     ...(cached.previewPaths || []),
@@ -258,7 +384,7 @@ function cachedTemplateFilesExist(cached) {
   return files.every((filePath) => existsSync(filePath))
 }
 
-function rehydrateCachedTemplate(cached, file, overrides) {
+function rehydrateCachedTemplate(cached, file, copied, overrides) {
   return {
     ...clonePlain(cached),
     id: overrides.id,
@@ -268,7 +394,60 @@ function rehydrateCachedTemplate(cached, file, overrides) {
     role: overrides.role,
     cacheKey: overrides.cacheKey,
     cacheHit: true,
+    previewPaths: copied.previewPaths,
+    assets: copied.assets,
   }
+}
+
+function getTemplateDiskCacheRoot() {
+  return path.join(diskCacheRoot, 'template-analysis')
+}
+
+function getContentDiskCacheRoot() {
+  return path.join(diskCacheRoot, 'content-text')
+}
+
+function getTemplateDiskCacheDir(cacheKey) {
+  return path.join(getTemplateDiskCacheRoot(), hashCacheKey(cacheKey))
+}
+
+function hashCacheKey(cacheKey) {
+  return createHash('sha1').update(cacheKey).digest('hex')
+}
+
+async function cleanupDiskCache() {
+  if (!diskCacheRoot) return
+  await cleanupCacheDirectory(getTemplateDiskCacheRoot(), true)
+  await cleanupCacheDirectory(getContentDiskCacheRoot(), false)
+}
+
+async function cleanupCacheDirectory(directory, isDirectoryCache) {
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => [])
+  const items = []
+  for (const entry of entries) {
+    const fullPath = path.join(directory, entry.name)
+    if (isDirectoryCache && !entry.isDirectory()) continue
+    if (!isDirectoryCache && !entry.isFile()) continue
+    const info = await stat(fullPath).catch(() => null)
+    if (!info) continue
+    items.push({ path: fullPath, mtimeMs: info.mtimeMs })
+  }
+
+  const now = Date.now()
+  await Promise.all(
+    items
+      .filter((item) => now - item.mtimeMs > cacheTtlMs)
+      .map((item) => rm(item.path, { recursive: true, force: true }).catch(() => {})),
+  )
+
+  const fresh = items
+    .filter((item) => now - item.mtimeMs <= cacheTtlMs)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+  await Promise.all(
+    fresh
+      .slice(maxDiskCacheEntries)
+      .map((item) => rm(item.path, { recursive: true, force: true }).catch(() => {})),
+  )
 }
 
 function clonePlain(value) {
