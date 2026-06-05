@@ -1317,6 +1317,45 @@ legend {
   line-height: 1.55;
 }
 
+.ppt-progress-notice,
+.ppt-cache-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  color: #765235;
+  background: #fff8ef;
+  border: 1px solid #efd7bd;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.ppt-progress-notice svg,
+.ppt-cache-summary svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #b86232;
+}
+
+.ppt-progress-notice div {
+  display: grid;
+  gap: 2px;
+}
+
+.ppt-progress-notice strong {
+  color: #71472a;
+}
+
+.ppt-progress-notice span,
+.ppt-cache-summary span {
+  color: var(--muted);
+}
+
+.ppt-cache-summary svg {
+  color: #3d8c62;
+}
+
 .master-block {
   padding: 15px;
   background: #fffbf6;

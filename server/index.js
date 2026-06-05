@@ -4,7 +4,7 @@ import cors from 'cors'
 import multer from 'multer'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -68,6 +68,8 @@ const uploadRoot = await mkdtemp(path.join(os.tmpdir(), 'material-quiz-uploads-'
 const sessions = new Map()
 const pptSessions = new Map()
 const pptJobs = new Map()
+const pptTemplateFillLibraryCache = new Map()
+const maxPptTemplateFillLibraryCacheEntries = 20
 const accessPassword = String(process.env.ACCESS_PASSWORD || '').trim()
 const accessAuthEnabled = Boolean(accessPassword)
 const accessCookieName = 'moonwalk_access'
@@ -213,43 +215,33 @@ app.post('/api/ppt/analyze', upload.fields([
     await assertPptRendererReady()
     const aiProvider = getAiProvider(req.body?.aiProvider)
     assertAiProviderReady(aiProvider)
-
     const files = req.files || {}
     const templateFiles = Array.isArray(files.templates) ? files.templates : []
-    const contentFile = Array.isArray(files.contentFile) ? files.contentFile[0] : null
-    const masterFile = Array.isArray(files.master) ? files.master[0] : null
+    if (!templateFiles.length) throw new Error('请至少上传 1 个模板文件。')
+    if (templateFiles.length > 10) throw new Error('模板文件最多上传 10 个。')
+
     const sessionId = nanoid()
     const sessionDir = path.join(uploadRoot, `ppt-${sessionId}`)
     await mkdir(sessionDir, { recursive: true })
 
-    const [templates, contentFileResult, master] = await Promise.all([
-      analyzeTemplateFiles(templateFiles, sessionDir),
-      extractContentFileText(contentFile),
-      analyzeMasterFile(masterFile, sessionDir),
-    ])
-
-    const session = {
-      id: sessionId,
-      aiProviderId: aiProvider.id,
-      sessionDir,
-      templates,
-      contentText: normalizeLongText(req.body?.contentText, 40000),
-      contentFileText: contentFileResult.text,
-      contentFileInfo: contentFileResult.fileInfo,
-      requirements: normalizeLongText(req.body?.requirements, 12000),
-      master,
-      masterDescription: normalizeLongText(req.body?.masterDescription, 12000),
-      mode: null,
-      pptType: null,
-      slideCount: null,
-      mainTemplateId: templates[0]?.id || null,
-      plan: null,
-      output: null,
-      createdAt: Date.now(),
-    }
-    pptSessions.set(sessionId, session)
-
-    res.json(serializePptSession(session))
+    const job = createPptJob(sessionId, 'analyze')
+    runPptJob(job, async ({ update }) => {
+      try {
+        return await analyzePptUploadSession({
+          aiProvider,
+          files,
+          body: req.body,
+          sessionId,
+          sessionDir,
+          update,
+        })
+      } catch (error) {
+        await cleanupUploadedFiles(req.files)
+        await rm(sessionDir, { recursive: true, force: true }).catch(() => {})
+        throw error
+      }
+    })
+    res.json(serializePptJob(job))
   } catch (error) {
     await cleanupUploadedFiles(req.files)
     res.status(400).json({ error: toUserError(error) })
@@ -266,8 +258,9 @@ app.post('/api/ppt/generate', async (req, res) => {
 
     applyPptSettings(session, settings)
     const job = createPptJob(session.id, 'generate')
-    runPptJob(job, async () => {
-      await generatePptSessionOutput(session, aiProvider)
+    runPptJob(job, async ({ update }) => {
+      update('正在整理内容、需求和模板规则。')
+      await generatePptSessionOutput(session, aiProvider, update)
       return serializePptSession(session)
     })
     res.json(serializePptJob(job))
@@ -297,13 +290,15 @@ app.post('/api/ppt/revise', async (req, res) => {
     }
 
     const job = createPptJob(session.id, 'revise')
-    runPptJob(job, async () => {
+    runPptJob(job, async ({ update }) => {
+      update('正在读取每页修改意见。')
       const plan = await aiProvider.module.revisePptPlan({
         ...buildPptAiContext(session),
         currentPlan: session.plan,
         slideComments: settings.slideComments,
       })
-      await renderPptSessionOutput(session, plan, { engine: 'fallback' })
+      update('AI 已返回修改方案，正在重新渲染 PPT。')
+      await renderPptSessionOutput(session, plan, { engine: 'fallback', update })
       return serializePptSession(session)
     })
     res.json(serializePptJob(job))
@@ -331,6 +326,53 @@ app.get('/api/ppt/:sessionId/download/pdf', (req, res) => {
     res.status(404).json({ error: toUserError(error) })
   }
 })
+
+async function analyzePptUploadSession({ aiProvider, files, body, sessionId, sessionDir, update }) {
+  const templateFiles = Array.isArray(files.templates) ? files.templates : []
+  const contentFile = Array.isArray(files.contentFile) ? files.contentFile[0] : null
+  const masterFile = Array.isArray(files.master) ? files.master[0] : null
+
+  update('正在分析模板文件并生成预览。')
+  const templates = await analyzeTemplateFiles(templateFiles, sessionDir)
+  const cachedTemplateCount = templates.filter((template) => template.cacheHit).length
+
+  update(contentFile ? '正在读取 PPT 内容文件。' : '正在整理 PPT 文本内容。')
+  const contentFileResult = await extractContentFileText(contentFile)
+
+  update(masterFile ? '正在识别幻灯片母版结构。' : '正在整理模板生成设置。')
+  const master = await analyzeMasterFile(masterFile, sessionDir)
+
+  const session = {
+    id: sessionId,
+    aiProviderId: aiProvider.id,
+    sessionDir,
+    templates,
+    contentText: normalizeLongText(body?.contentText, 40000),
+    contentFileText: contentFileResult.text,
+    contentFileInfo: contentFileResult.fileInfo,
+    requirements: normalizeLongText(body?.requirements, 12000),
+    master,
+    masterDescription: normalizeLongText(body?.masterDescription, 12000),
+    mode: null,
+    pptType: null,
+    slideCount: null,
+    mainTemplateId: templates[0]?.id || null,
+    plan: null,
+    output: null,
+    cacheSummary: {
+      templateHits: cachedTemplateCount,
+      templateTotal: templates.length,
+      contentHit: Boolean(contentFileResult.cacheHit),
+      masterHit: Boolean(master?.cacheHit),
+    },
+    createdAt: Date.now(),
+  }
+  pptSessions.set(sessionId, session)
+  update(cachedTemplateCount > 0
+    ? `模板分析完成，已复用 ${cachedTemplateCount}/${templates.length} 个缓存结果。`
+    : '模板分析完成，已生成可用预览。')
+  return serializePptSession(session)
+}
 
 app.post('/api/generate', async (req, res) => {
   try {
@@ -485,7 +527,7 @@ function createPptJob(sessionId, type) {
     sessionId,
     type,
     status: 'queued',
-    message: '任务已创建，正在排队。',
+    message: getPptJobMessage(type, 'queued'),
     result: null,
     error: '',
     createdAt: new Date().toISOString(),
@@ -498,21 +540,46 @@ function createPptJob(sessionId, type) {
 function runPptJob(job, handler) {
   queueMicrotask(async () => {
     try {
-      updatePptJob(job, { status: 'running', message: '正在生成 PPT，请稍候。' })
-      const result = await handler()
+      updatePptJob(job, { status: 'running', message: getPptJobMessage(job.type, 'running') })
+      const update = (message) => updatePptJob(job, { status: 'running', message })
+      const result = await handler({ update })
       updatePptJob(job, {
         status: 'completed',
-        message: 'PPT 已生成。',
+        message: getPptJobMessage(job.type, 'completed'),
         result,
       })
     } catch (error) {
       updatePptJob(job, {
         status: 'failed',
-        message: 'PPT 生成失败。',
+        message: getPptJobMessage(job.type, 'failed'),
         error: toUserError(error),
       })
     }
   })
+}
+
+function getPptJobMessage(type, status) {
+  const messages = {
+    analyze: {
+      queued: '分析任务已创建，正在排队。',
+      running: '正在分析模板、内容和预览，请稍候。',
+      completed: '模板分析完成。',
+      failed: '模板分析失败。',
+    },
+    generate: {
+      queued: '生成任务已创建，正在排队。',
+      running: '正在生成 PPT，请稍候。',
+      completed: 'PPT 已生成。',
+      failed: 'PPT 生成失败。',
+    },
+    revise: {
+      queued: '修改任务已创建，正在排队。',
+      running: '正在根据修改意见重新生成，请稍候。',
+      completed: 'PPT 已重新生成。',
+      failed: 'PPT 修改失败。',
+    },
+  }
+  return messages[type]?.[status] || '任务正在处理。'
 }
 
 function updatePptJob(job, patch) {
@@ -730,24 +797,28 @@ function buildPptAiContext(session) {
   }
 }
 
-async function generatePptSessionOutput(session, aiProvider) {
+async function generatePptSessionOutput(session, aiProvider, update = () => {}) {
   const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
   const canUseTemplateFill = mainTemplate?.extension === '.pptx' && !session.master
   if (canUseTemplateFill && typeof aiProvider.module.generatePptTemplateFillPlan === 'function') {
     try {
-      await renderTemplateFillSessionOutput(session, aiProvider, mainTemplate)
+      update('正在尝试使用模板填充引擎复用原 PPT 结构。')
+      await renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update)
       return
     } catch (error) {
       console.warn(`PPT Master template-fill 失败，回退到原生成器：${toUserError(error)}`)
       session.templateFillFallbackReason = toUserError(error)
+      update('模板填充不够稳定，正在切换到普通生成引擎。')
     }
   }
 
+  update('正在让 AI 规划每页标题、层级和内容结构。')
   const plan = await aiProvider.module.generatePptPlan(buildPptAiContext(session))
-  await renderPptSessionOutput(session, plan, { engine: 'fallback' })
+  update('AI 已返回页面方案，正在生成 PPTX。')
+  await renderPptSessionOutput(session, plan, { engine: 'fallback', update })
 }
 
-async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate) {
+async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update = () => {}) {
   const versionId = nanoid(8)
   const outputDir = path.join(session.sessionDir, 'outputs', versionId)
   const analysisDir = path.join(outputDir, 'template-fill')
@@ -758,8 +829,10 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   const checkPath = path.join(analysisDir, 'check_report.json')
   const pptxPath = path.join(outputDir, 'moonwalk-template-filled.pptx')
 
-  const library = await analyzeTemplateFillLibrary(mainTemplate.path, libraryPath)
+  update('正在读取模板中的页面、文本框和版式元素。')
+  const library = await loadTemplateFillLibrary(mainTemplate, libraryPath)
   const templateFillLibrary = pruneSlideLibraryForAi(library)
+  update('正在让 AI 生成逐页模板填充方案。')
   const fillPlan = await aiProvider.module.generatePptTemplateFillPlan({
     ...buildPptAiContext(session),
     templateFillLibrary,
@@ -771,6 +844,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   }
   await writeTemplateFillPlan(planPath, fillPlan)
 
+  update('正在校验填充方案，避免无效占位和明显溢出。')
   const checkReport = await checkTemplateFillPlan(libraryPath, planPath, checkPath)
   const checkSummary = summarizeTemplateFillCheck(checkReport)
   if (checkSummary.error > 0) {
@@ -780,6 +854,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
     throw new Error(`模板填充计划有 ${checkSummary.warn} 个容量警告，已回退到普通生成。`)
   }
 
+  update('正在应用填充方案生成 PPTX。')
   const rawGeneratedPptxPath = await applyTemplateFillPlan(mainTemplate.path, planPath, pptxPath)
   const generatedPptxPath = await normalizePptxForRendering(rawGeneratedPptxPath)
   const plan = templateFillPlanToPptPlan(fillPlan, mainTemplate.originalName || 'Moonwalk PPT')
@@ -788,6 +863,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   let previewSource = 'template-fill'
   let previewFallbackReason = ''
   try {
+    update('正在把 PPTX 转换为预览图和 PDF。')
     const rendered = await renderDocumentToPreviews(generatedPptxPath, previewDir, { prefix: 'slide', dpi: 128 })
     pdfPath = rendered.pdfPath
     previewPaths = rendered.previewPaths
@@ -795,6 +871,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
     previewSource = 'fallback'
     previewFallbackReason = toUserError(error)
     console.warn(`PPT Master template-fill PPTX 预览转换失败，改用普通生成器生成预览：${previewFallbackReason}`)
+    update('PPTX 已生成，预览转换失败，正在生成兜底预览。')
     const fallbackPreview = await renderFallbackPreviewForTemplateFill(session, plan, outputDir, mainTemplate)
     previewPaths = fallbackPreview.previewPaths
   }
@@ -815,6 +892,29 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
       planPath,
       checkPath,
     },
+  }
+}
+
+async function loadTemplateFillLibrary(template, libraryPath) {
+  const cacheKey = template?.cacheKey || `${template?.extension || 'pptx'}:${template?.size || 0}:${template?.originalName || ''}`
+  const cached = pptTemplateFillLibraryCache.get(cacheKey)
+  if (cached) {
+    await writeFile(libraryPath, `${JSON.stringify(cached, null, 2)}\n`, 'utf8')
+    return clonePlain(cached)
+  }
+
+  const library = await analyzeTemplateFillLibrary(template.path, libraryPath)
+  rememberPptTemplateFillLibrary(cacheKey, library)
+  return library
+}
+
+function rememberPptTemplateFillLibrary(key, library) {
+  if (!key) return
+  if (pptTemplateFillLibraryCache.has(key)) pptTemplateFillLibraryCache.delete(key)
+  pptTemplateFillLibraryCache.set(key, clonePlain(library))
+  while (pptTemplateFillLibraryCache.size > maxPptTemplateFillLibraryCacheEntries) {
+    const oldestKey = pptTemplateFillLibraryCache.keys().next().value
+    pptTemplateFillLibraryCache.delete(oldestKey)
   }
 }
 
@@ -848,6 +948,7 @@ async function renderPptSessionOutput(session, plan, options = {}) {
   const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
   const templateAssets = mainTemplate?.extension === '.pptx' ? mainTemplate.assets : []
 
+  options.update?.('正在写入 PPTX 文件。')
   await createPptxFromPlan({
     plan,
     outputPath: pptxPath,
@@ -867,6 +968,7 @@ async function renderPptSessionOutput(session, plan, options = {}) {
   let pdfPath = null
   let previewPaths = []
   try {
+    options.update?.('正在把 PPTX 转换为预览图和 PDF。')
     const rendered = await renderDocumentToPreviews(pptxPath, previewDir, { prefix: 'slide', dpi: 128 })
     pdfPath = rendered.pdfPath
     previewPaths = rendered.previewPaths
@@ -895,6 +997,7 @@ function serializePptSession(session) {
     slideCount: session.slideCount,
     contentFileInfo: session.contentFileInfo,
     masterDescription: session.masterDescription,
+    cacheSummary: session.cacheSummary || null,
     master: session.master
       ? {
           originalName: session.master.originalName,
@@ -961,6 +1064,10 @@ function safeDownloadName(value) {
     .replace(/[\\/:*?"<>|]/g, '-')
     .replace(/\s+/g, '-')
     .slice(0, 80)
+}
+
+function clonePlain(value) {
+  return JSON.parse(JSON.stringify(value))
 }
 
 function validateSelectedSections(session, selectedSectionIndexes) {

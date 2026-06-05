@@ -217,6 +217,12 @@ type PptSessionResponse = {
   pptType: PptType | null
   slideCount: number | null
   masterDescription: string
+  cacheSummary?: {
+    templateHits: number
+    templateTotal: number
+    contentHit: boolean
+    masterHit: boolean
+  } | null
   master: {
     originalName: string
     extension: string
@@ -255,7 +261,7 @@ type PptSessionResponse = {
 type PptJobResponse = {
   jobId: string
   sessionId: string
-  type: 'generate' | 'revise'
+  type: 'analyze' | 'generate' | 'revise'
   status: 'queued' | 'running' | 'completed' | 'failed'
   message: string
   error: string
@@ -263,6 +269,10 @@ type PptJobResponse = {
 }
 
 type PptSlideComments = Record<number, string>
+type PptProgress = {
+  label: string
+  detail: string
+} | null
 
 const apiBase = import.meta.env.VITE_API_BASE || ''
 const fallbackQuestionCounts = [5, 10, 15, 20, 30]
@@ -336,6 +346,7 @@ function App() {
   const [isAnalyzingPpt, setIsAnalyzingPpt] = useState(false)
   const [isGeneratingPpt, setIsGeneratingPpt] = useState(false)
   const [isRevisingPpt, setIsRevisingPpt] = useState(false)
+  const [pptProgress, setPptProgress] = useState<PptProgress>(null)
   const [error, setError] = useState('')
   const [missingIds, setMissingIds] = useState<string[]>([])
 
@@ -574,6 +585,7 @@ function App() {
     setIsAnalyzingPpt(false)
     setIsGeneratingPpt(false)
     setIsRevisingPpt(false)
+    setPptProgress(null)
   }
 
   function backToUploadFromPpt() {
@@ -597,6 +609,7 @@ function App() {
 
     setError('')
     setIsAnalyzingPpt(true)
+    setPptProgress({ label: '模板分析', detail: '正在上传模板文件并创建分析任务。' })
     try {
       const formData = new FormData()
       pptTemplates.forEach((file) => formData.append('templates', file))
@@ -612,13 +625,20 @@ function App() {
         credentials: 'include',
         body: formData,
       })
-      const data = await parseApiResponse<PptSessionResponse>(response)
+      const job = await parseApiResponse<PptJobResponse>(response)
+      setPptProgress({ label: '模板分析', detail: job.message })
+      const data = await waitForPptJob(job.jobId, {
+        fallbackError: '模板分析失败，请重试。',
+        timeoutError: '模板分析时间过长，请稍后刷新或重新上传。',
+        onProgress: (nextJob) => setPptProgress({ label: '模板分析', detail: nextJob.message }),
+      })
       setPptSession(data)
       setPptMainTemplateId(data.selectedMainTemplateId || data.templates[0]?.id || '')
     } catch (pptError) {
       setError(getErrorText(pptError))
     } finally {
       setIsAnalyzingPpt(false)
+      setPptProgress(null)
     }
   }
 
@@ -635,6 +655,7 @@ function App() {
 
     setError('')
     setIsGeneratingPpt(true)
+    setPptProgress({ label: '生成初稿', detail: '正在创建 PPT 生成任务。' })
     try {
       const job = await fetchJson<PptJobResponse>('/api/ppt/generate', {
         method: 'POST',
@@ -651,7 +672,12 @@ function App() {
           requirements: pptRequirements,
         }),
       })
-      const data = await waitForPptJob(job.jobId)
+      setPptProgress({ label: '生成初稿', detail: job.message })
+      const data = await waitForPptJob(job.jobId, {
+        fallbackError: 'PPT 生成失败，请重试。',
+        timeoutError: 'PPT 生成时间过长，请稍后刷新或重新生成。',
+        onProgress: (nextJob) => setPptProgress({ label: '生成初稿', detail: nextJob.message }),
+      })
       setPptSession(data)
       setPptSlideComments({})
       setStep('pptPreview')
@@ -660,6 +686,7 @@ function App() {
       setError(getErrorText(pptError))
     } finally {
       setIsGeneratingPpt(false)
+      setPptProgress(null)
     }
   }
 
@@ -675,6 +702,7 @@ function App() {
 
     setError('')
     setIsRevisingPpt(true)
+    setPptProgress({ label: '重新生成', detail: '正在创建修改任务。' })
     try {
       const job = await fetchJson<PptJobResponse>('/api/ppt/revise', {
         method: 'POST',
@@ -685,7 +713,12 @@ function App() {
           slideComments,
         }),
       })
-      const data = await waitForPptJob(job.jobId)
+      setPptProgress({ label: '重新生成', detail: job.message })
+      const data = await waitForPptJob(job.jobId, {
+        fallbackError: 'PPT 修改失败，请重试。',
+        timeoutError: 'PPT 修改时间过长，请稍后刷新或重新生成。',
+        onProgress: (nextJob) => setPptProgress({ label: '重新生成', detail: nextJob.message }),
+      })
       setPptSession(data)
       setPptSlideComments({})
       window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -693,6 +726,7 @@ function App() {
       setError(getErrorText(pptError))
     } finally {
       setIsRevisingPpt(false)
+      setPptProgress(null)
     }
   }
 
@@ -779,24 +813,28 @@ function App() {
             setPptTemplates(files)
             setPptSession(null)
             setPptMainTemplateId('')
+            setPptProgress(null)
           }}
           masterFile={pptMasterFile}
           setMasterFile={(file) => {
             setPptMasterFile(file)
             setPptSession(null)
             setPptMainTemplateId('')
+            setPptProgress(null)
           }}
           masterDescription={pptMasterDescription}
           setMasterDescription={(value) => {
             setPptMasterDescription(value)
             setPptSession(null)
             setPptMainTemplateId('')
+            setPptProgress(null)
           }}
           contentFile={pptContentFile}
           setContentFile={(file) => {
             setPptContentFile(file)
             setPptSession(null)
             setPptMainTemplateId('')
+            setPptProgress(null)
           }}
           contentText={pptContentText}
           setContentText={setPptContentText}
@@ -813,6 +851,7 @@ function App() {
           setMainTemplateId={setPptMainTemplateId}
           isAnalyzing={isAnalyzingPpt}
           isGenerating={isGeneratingPpt}
+          progress={pptProgress}
           error={error}
           onAnalyze={handleAnalyzePptTemplates}
           onGenerate={handleGeneratePpt}
@@ -827,6 +866,7 @@ function App() {
           slideComments={pptSlideComments}
           setSlideComments={setPptSlideComments}
           isRevising={isRevisingPpt}
+          progress={pptProgress}
           error={error}
           lockedAiProvider={lockedAiProvider}
           onRevise={handleRevisePpt}
@@ -1976,6 +2016,7 @@ function PptSetupView({
   setMainTemplateId,
   isAnalyzing,
   isGenerating,
+  progress,
   error,
   onAnalyze,
   onGenerate,
@@ -2007,6 +2048,7 @@ function PptSetupView({
   setMainTemplateId: (id: string) => void
   isAnalyzing: boolean
   isGenerating: boolean
+  progress: PptProgress
   error: string
   onAnalyze: (event: FormEvent) => void
   onGenerate: (event?: FormEvent) => void
@@ -2162,6 +2204,13 @@ function PptSetupView({
             {isAnalyzing ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
             {isAnalyzing ? '正在分析模板' : '分析模板'}
           </button>
+          {isAnalyzing && progress && <PptProgressNotice progress={progress} />}
+          {session?.cacheSummary && (
+            <div className="ppt-cache-summary">
+              <CheckCircle2 size={17} />
+              <span>{formatPptCacheSummary(session.cacheSummary)}</span>
+            </div>
+          )}
         </form>
 
         <aside className="panel ppt-settings-panel">
@@ -2228,6 +2277,7 @@ function PptSetupView({
             {isGenerating ? <Loader2 className="spin" size={18} /> : <ChevronRight size={18} />}
             {isGenerating ? '正在生成，可能需要几分钟' : '生成 PPT 初稿'}
           </button>
+          {isGenerating && progress && <PptProgressNotice progress={progress} />}
 
           {error && (
             <ErrorNotice
@@ -2283,6 +2333,7 @@ function PptPreviewView({
   slideComments,
   setSlideComments,
   isRevising,
+  progress,
   error,
   lockedAiProvider,
   onRevise,
@@ -2294,6 +2345,7 @@ function PptPreviewView({
   slideComments: PptSlideComments
   setSlideComments: (comments: PptSlideComments) => void
   isRevising: boolean
+  progress: PptProgress
   error: string
   lockedAiProvider: AiProviderId
   onRevise: () => void
@@ -2338,6 +2390,7 @@ function PptPreviewView({
           onAction={lockedAiProvider === 'openai' ? onSwitchToDeepSeek : undefined}
         />
       )}
+      {isRevising && progress && <PptProgressNotice progress={progress} />}
 
       <section className="ppt-slide-list">
         {previews.map((url, index) => (
@@ -2475,6 +2528,19 @@ function ErrorNotice({
   )
 }
 
+function PptProgressNotice({ progress }: { progress: PptProgress }) {
+  if (!progress) return null
+  return (
+    <div className="ppt-progress-notice">
+      <Loader2 className="spin" size={18} />
+      <div>
+        <strong>{progress.label}</strong>
+        <span>{progress.detail}</span>
+      </div>
+    </div>
+  )
+}
+
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${url}`, {
     ...options,
@@ -2491,17 +2557,25 @@ async function parseApiResponse<T>(response: Response): Promise<T> {
   return data as T
 }
 
-async function waitForPptJob(jobId: string): Promise<PptSessionResponse> {
+async function waitForPptJob(
+  jobId: string,
+  options: {
+    fallbackError?: string
+    timeoutError?: string
+    onProgress?: (job: PptJobResponse) => void
+  } = {},
+): Promise<PptSessionResponse> {
   const startedAt = Date.now()
   while (Date.now() - startedAt < 20 * 60 * 1000) {
     await delay(2500)
     const job = await fetchJson<PptJobResponse>(`/api/ppt/jobs/${jobId}`)
+    options.onProgress?.(job)
     if (job.status === 'completed' && job.result) return job.result
     if (job.status === 'failed') {
-      throw new Error(job.error || 'PPT 生成失败，请重试。')
+      throw new Error(job.error || options.fallbackError || 'PPT 生成失败，请重试。')
     }
   }
-  throw new Error('PPT 生成时间过长，请稍后刷新或重新生成。')
+  throw new Error(options.timeoutError || 'PPT 生成时间过长，请稍后刷新或重新生成。')
 }
 
 function delay(ms: number) {
@@ -2525,6 +2599,18 @@ function formatAnswerWithText(answer: OptionId[], options: Question['options']) 
     .sort()
     .map((id) => `${id}. ${optionMap.get(id) || '未找到对应选项内容'}`)
     .join('；')
+}
+
+function formatPptCacheSummary(cacheSummary: NonNullable<PptSessionResponse['cacheSummary']>) {
+  const parts = []
+  if (cacheSummary.templateHits > 0) {
+    parts.push(`已复用 ${cacheSummary.templateHits}/${cacheSummary.templateTotal} 个模板缓存`)
+  } else {
+    parts.push('模板分析结果已加入缓存')
+  }
+  if (cacheSummary.contentHit) parts.push('内容文件缓存命中')
+  if (cacheSummary.masterHit) parts.push('母版缓存命中')
+  return `${parts.join(' · ')}，下次上传相同文件会更快。`
 }
 
 function getAiProviders(health: Health | null) {

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import AdmZip from 'adm-zip'
@@ -23,6 +25,9 @@ const parser = new XMLParser({
 
 const templateExtensions = new Set(['.pptx', '.pdf'])
 const contentExtensions = new Set(['.txt', '.docx', '.pdf', '.pptx'])
+const templateAnalysisCache = new Map()
+const contentTextCache = new Map()
+const maxCacheEntries = 30
 
 export async function analyzeTemplateFiles(files, sessionDir) {
   if (!files?.length) throw new Error('请至少上传 1 个模板文件。')
@@ -64,6 +69,20 @@ export async function extractContentFileText(file) {
     throw new Error('内容文件超过 50MB，请上传更小的文件。')
   }
 
+  const cacheKey = await getFileCacheKey(file, `content:${extension}`)
+  const cached = contentTextCache.get(cacheKey)
+  if (cached) {
+    return {
+      text: cached.text,
+      fileInfo: {
+        originalName,
+        extension,
+        size: file.size,
+      },
+      cacheHit: true,
+    }
+  }
+
   let text = ''
   if (extension === '.txt') text = await extractPlainText(file.path)
   if (extension === '.docx') text = await extractDocxText(file.path)
@@ -78,14 +97,17 @@ export async function extractContentFileText(file) {
     text = await extractPptxText(file.path)
   }
 
-  return {
+  const result = {
     text,
     fileInfo: {
       originalName,
       extension,
       size: file.size,
     },
+    cacheHit: false,
   }
+  rememberCacheEntry(contentTextCache, cacheKey, { text })
+  return result
 }
 
 export function buildTemplateContext(templates) {
@@ -129,6 +151,19 @@ async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
 
   const id = `${options.idPrefix || 'tpl'}_${index + 1}`
   const directoryName = options.directoryName || 'templates'
+  const previewLimit = options.previewLimit || 6
+  const cacheKey = await getFileCacheKey(file, `template:${extension}:preview-${previewLimit}`)
+  const cached = templateAnalysisCache.get(cacheKey)
+  if (cached && cachedTemplateFilesExist(cached)) {
+    return rehydrateCachedTemplate(cached, file, {
+      id,
+      originalName,
+      role: options.role || (index === 0 ? 'main' : 'auxiliary'),
+      cacheKey,
+    })
+  }
+  if (cached) templateAnalysisCache.delete(cacheKey)
+
   const renderDir = path.join(sessionDir, directoryName, id, 'preview')
   const assetDir = path.join(sessionDir, directoryName, id, 'assets')
   await mkdir(assetDir, { recursive: true })
@@ -147,6 +182,8 @@ async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
     previewPaths: [],
     assets: [],
     slideTexts: [],
+    cacheKey,
+    cacheHit: false,
   }
 
   if (extension === '.pdf') {
@@ -155,7 +192,6 @@ async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
       throw new Error(`模板 PDF「${originalName}」共 ${pageCount} 页，超过 100 页限制。`)
     }
     const text = await extractPdfText(file.path).catch(() => '')
-    const previewLimit = options.previewLimit || 6
     const rendered = await renderDocumentToPreviews(file.path, renderDir, {
       prefix: 'page',
       dpi: 96,
@@ -167,12 +203,14 @@ async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
       console.warn(`PDF 模板「${originalName}」预览生成失败：${error.message}`)
       return { previewPaths: [] }
     })
-    return {
+    const result = {
       ...base,
       pageCount,
       textSample: trimText(text, 1600),
       previewPaths: rendered.previewPaths.slice(0, previewLimit),
     }
+    rememberCacheEntry(templateAnalysisCache, cacheKey, result)
+    return result
   }
 
   const slideCount = getPptxSlideCount(file.path)
@@ -184,15 +222,57 @@ async function analyzeTemplateFile(file, index, sessionDir, options = {}) {
     inspectPptxStyle(file.path, assetDir).catch(() => ({ colors: [], assets: [] })),
   ])
   const rendered = await renderDocumentToPreviews(file.path, renderDir, { prefix: 'slide', dpi: 96, extension })
-  return {
+  const result = {
     ...base,
     slideCount,
     textSample: trimText(text, 1800),
     detectedColors: style.colors,
-    previewPaths: rendered.previewPaths.slice(0, options.previewLimit || 6),
+    previewPaths: rendered.previewPaths.slice(0, previewLimit),
     assets: style.assets.slice(0, 8),
     slideTexts: style.slideTexts,
   }
+  rememberCacheEntry(templateAnalysisCache, cacheKey, result)
+  return result
+}
+
+async function getFileCacheKey(file, scope) {
+  const data = await readFile(file.path)
+  const hash = createHash('sha256').update(data).digest('hex')
+  return `${scope}:${file.size}:${hash}`
+}
+
+function rememberCacheEntry(cache, key, value) {
+  if (cache.has(key)) cache.delete(key)
+  cache.set(key, clonePlain(value))
+  while (cache.size > maxCacheEntries) {
+    const oldestKey = cache.keys().next().value
+    cache.delete(oldestKey)
+  }
+}
+
+function cachedTemplateFilesExist(cached) {
+  const files = [
+    ...(cached.previewPaths || []),
+    ...(cached.assets || []).map((asset) => asset.path).filter(Boolean),
+  ]
+  return files.every((filePath) => existsSync(filePath))
+}
+
+function rehydrateCachedTemplate(cached, file, overrides) {
+  return {
+    ...clonePlain(cached),
+    id: overrides.id,
+    originalName: overrides.originalName,
+    size: file.size,
+    path: file.path,
+    role: overrides.role,
+    cacheKey: overrides.cacheKey,
+    cacheHit: true,
+  }
+}
+
+function clonePlain(value) {
+  return JSON.parse(JSON.stringify(value))
 }
 
 async function inspectPptxStyle(filePath, assetDir) {
