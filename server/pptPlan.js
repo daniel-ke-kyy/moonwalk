@@ -67,12 +67,16 @@ export function buildPptTemplateFillPrompt(context) {
   return `请根据用户内容和 PPTX 模板页面库，生成中文 PPT 模板填充计划，并只返回 JSON。
 
 这个任务不是从零设计 PPT，而是根据“内容叙事大纲 + 页面策略”选择模板中的源页面，克隆页面，并把新内容写入已有文本槽位。
+${context.templateFillSourceRole === 'master'
+  ? '\n重要：当前源文件是用户上传的“幻灯片母版 PPTX”。你必须把它当成可编辑母版直接修改，只替换母版页面中原有示例文字，不允许把母版当背景图，也不允许新增白色文本框、色块、遮罩或任何新页面元素。'
+  : ''}
 
 生成目标：
 - PPT 类型：${context.pptType}
 - 生成模式：${context.mode}
 - 页数：${context.slideCount}
 - 主模板：${context.mainTemplateName}
+- 当前直接编辑源：${context.templateFillSourceName || context.mainTemplateName}
 
 用户输入的 PPT 内容：
 ${context.contentText || '用户未提供明确内容。'}
@@ -105,6 +109,8 @@ ${JSON.stringify(context.templateFillLibrary, null, 2)}
 10. 不要生成图片，不要要求新增页面元素。
 11. 如内容不足，合理补全结构，但不要声称来自用户材料。
 12. layout 只能从 cover、agenda、section、content、two_column、comparison、timeline、quote、summary 中选择。
+13. 如果源文件是母版 PPTX：保留 logo、页眉页脚、页码、装饰线、背景、数字编号、红色侧栏等固定视觉元素；优先替换 XXXXX、占位标题、占位正文、示例项目名等明显示例文字。
+14. 如果源文件是母版 PPTX：不要把“目录”“01”“02”“03”“04”这类结构性文字随意改掉，除非它本身就是该页唯一需要表达的新内容。
 
 JSON 格式：
 {

@@ -877,19 +877,26 @@ function buildPptAiContext(session) {
 async function generatePptSessionOutput(session, aiProvider, update = () => {}, assertNotCancelled = () => {}) {
   assertNotCancelled()
   const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
-  const canUseTemplateFill = mainTemplate?.extension === '.pptx' && !session.master
+  const templateFillSource = getTemplateFillSource(session, mainTemplate)
   session.narrativePlan = null
   session.templateDiagnostics = null
-  if (canUseTemplateFill && typeof aiProvider.module.generatePptTemplateFillPlan === 'function') {
+  if (templateFillSource && typeof aiProvider.module.generatePptTemplateFillPlan === 'function') {
     try {
       assertNotCancelled()
-      update('正在尝试使用模板填充引擎复用原 PPT 结构。')
-      await renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update, {}, assertNotCancelled)
+      update(templateFillSource.role === 'master'
+        ? '正在直接编辑母版 PPTX 中的原始文本框。'
+        : '正在尝试使用模板填充引擎复用原 PPT 结构。')
+      await renderTemplateFillSessionOutput(session, aiProvider, templateFillSource.template, update, {
+        sourceRole: templateFillSource.role,
+      }, assertNotCancelled)
       assertNotCancelled()
       await runPptQualityCheck(session, aiProvider, update, assertNotCancelled)
       return
     } catch (error) {
       if (isPptJobCancelledError(error)) throw error
+      if (templateFillSource.role === 'master') {
+        throw new Error(`母版直接编辑失败：${toUserError(error)}。请确认母版 PPTX 中包含可编辑文本框，而不是整页截图。`)
+      }
       console.warn(`PPT Master template-fill 失败，回退到原生成器：${toUserError(error)}`)
       session.templateFillFallbackReason = toUserError(error)
       update('模板填充不够稳定，正在切换到普通生成引擎。')
@@ -954,26 +961,32 @@ async function revisePptSessionPlan(session, aiProvider, slideComments, update =
 
 async function renderRevisedPptSessionOutput(session, aiProvider, plan, slideComments, update = () => {}, assertNotCancelled = () => {}) {
   const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
+  const templateFillSource = getTemplateFillSource(session, mainTemplate)
   const canUseTemplateFillRevision = session.output?.engine === 'template-fill'
     && session.templateFillPlan
-    && mainTemplate?.extension === '.pptx'
-    && !session.master
+    && templateFillSource
     && typeof aiProvider.module.generatePptTemplateFillPlan === 'function'
 
   if (canUseTemplateFillRevision) {
     try {
       assertNotCancelled()
-      update('正在沿用模板填充引擎，只更新有修改意见的页面。')
-      await renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update, {
+      update(templateFillSource.role === 'master'
+        ? '正在沿用母版直接编辑，只更新有修改意见的页面。'
+        : '正在沿用模板填充引擎，只更新有修改意见的页面。')
+      await renderTemplateFillSessionOutput(session, aiProvider, templateFillSource.template, update, {
         baseFillPlan: session.templateFillPlan,
         targetSlideNumbers: slideComments.map((item) => item.slideNumber),
         planOverride: plan,
+        sourceRole: templateFillSource.role,
       }, assertNotCancelled)
       assertNotCancelled()
       await runPptQualityCheck(session, aiProvider, update, assertNotCancelled)
       return
     } catch (error) {
       if (isPptJobCancelledError(error)) throw error
+      if (templateFillSource.role === 'master') {
+        throw new Error(`母版直接修改失败：${toUserError(error)}。请确认母版 PPTX 中包含可编辑文本框。`)
+      }
       console.warn(`PPT 局部模板填充修改失败，回退到普通渲染：${toUserError(error)}`)
       update('模板填充局部修改不够稳定，正在回退到普通渲染。')
     }
@@ -1001,6 +1014,13 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   assertNotCancelled()
   const templateFillLibrary = pruneSlideLibraryForAi(library)
   const templatePageProfiles = buildTemplatePageProfiles(library)
+  const aiContext = buildPptAiContext(session)
+  const templateFillContext = {
+    ...aiContext,
+    fallbackTitle: mainTemplate.originalName || aiContext.fallbackTitle,
+    templateFillSourceName: mainTemplate.originalName || '',
+    templateFillSourceRole: options.sourceRole || 'template',
+  }
   let fillPlan = options.baseFillPlan ? clonePlain(options.baseFillPlan) : null
   if (fillPlan && options.planOverride) {
     fillPlan = mergeTemplateFillPlanWithPptPlan(fillPlan, options.planOverride, options.targetSlideNumbers)
@@ -1008,7 +1028,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
     if (typeof aiProvider.module.generatePptNarrativePlan === 'function') {
       update('正在先理解内容，生成 PPT 叙事大纲和页面策略。')
       session.narrativePlan = await aiProvider.module.generatePptNarrativePlan({
-        ...buildPptAiContext(session),
+        ...templateFillContext,
         templatePageProfiles,
       })
       assertNotCancelled()
@@ -1018,7 +1038,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
 
     update('正在根据叙事大纲匹配模板页面并生成填充方案。')
     fillPlan = await aiProvider.module.generatePptTemplateFillPlan({
-      ...buildPptAiContext(session),
+      ...templateFillContext,
       templateFillLibrary,
       templateFillLibraryRaw: library,
       templatePageProfiles,
@@ -1106,6 +1126,16 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
       checkPath,
     },
   }
+}
+
+function getTemplateFillSource(session, mainTemplate) {
+  if (session.master?.extension === '.pptx') {
+    return { template: session.master, role: 'master' }
+  }
+  if (mainTemplate?.extension === '.pptx') {
+    return { template: mainTemplate, role: 'template' }
+  }
+  return null
 }
 
 async function loadTemplateFillLibrary(template, libraryPath) {
