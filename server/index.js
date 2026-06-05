@@ -69,6 +69,12 @@ import {
   OPEN_QUESTION_MIN,
   QUESTION_COUNTS,
 } from './types.js'
+import {
+  buildDocumentVisualContext,
+  combineVisualContexts,
+  publicVisualContext,
+  visualContextFromPreviewPaths,
+} from './visualContext.js'
 
 const app = express()
 const port = Number(process.env.PORT || 5174)
@@ -186,7 +192,20 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     const extension = getExtension(originalName)
     await validateFileBasics(file, extension)
     const inspection = await inspectDocument(file.path, extension)
-    const prepared = await prepareDocumentForAi(file.path, originalName, extension)
+    const allowSparseText = aiProvider.id === 'openai'
+    const prepared = await prepareDocumentForAi(file.path, originalName, extension, { allowSparseText })
+    if (aiProvider.id === 'openai') {
+      const visualContext = await buildDocumentVisualContext({
+        inputPath: file.path,
+        extension,
+        outputDir: path.join(uploadRoot, `material-visual-${nanoid(8)}`),
+        label: originalName,
+        kind: 'material',
+        maxPages: 4,
+      })
+      prepared.visualContext = visualContext
+      prepared.processingNotes.push(...visualContext.notes)
+    }
     const fileInfo = {
       originalName,
       extension,
@@ -379,7 +398,9 @@ async function analyzePptUploadSession({ aiProvider, files, body, sessionId, ses
 
   assertNotCancelled()
   update(contentFile ? '正在读取 PPT 内容文件。' : '正在整理 PPT 文本内容。')
-  const contentFileResult = await extractContentFileText(contentFile)
+  const contentFileResult = await extractContentFileText(contentFile, {
+    allowSparseText: aiProvider.id === 'openai',
+  })
 
   assertNotCancelled()
   const structuredMasterFiles = STRUCTURED_MASTER_ROLES.filter((role) => Array.isArray(files?.[role.field]) && files[role.field][0])
@@ -391,6 +412,16 @@ async function analyzePptUploadSession({ aiProvider, files, body, sessionId, ses
   const structuredMasters = await analyzeStructuredMasterFiles(files, sessionDir)
   const usesStructuredMasters = hasStructuredMasters(structuredMasters)
   const master = usesStructuredMasters ? null : await analyzeMasterFile(masterFile, sessionDir)
+  const contentVisualContext = aiProvider.id === 'openai' && contentFile && contentFileResult.fileInfo
+    ? await buildDocumentVisualContext({
+        inputPath: contentFile.path,
+        extension: contentFileResult.fileInfo.extension,
+        outputDir: path.join(sessionDir, 'content-visual'),
+        label: contentFileResult.fileInfo.originalName,
+        kind: 'ppt-content',
+        maxPages: 4,
+      })
+    : null
 
   assertNotCancelled()
   const session = {
@@ -421,6 +452,7 @@ async function analyzePptUploadSession({ aiProvider, files, body, sessionId, ses
     output: null,
     qualityCheck: null,
     revisionSummary: null,
+    contentVisualContext,
     cacheSummary: {
       templateHits: cachedTemplateCount,
       templateTotal: templates.length,
@@ -888,6 +920,7 @@ function applyPptSettings(session, settings) {
 function buildPptAiContext(session) {
   const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
   const auxiliaryTemplates = session.templates.filter((template) => template.id !== mainTemplate?.id)
+  const visualContext = session.aiProviderId === 'openai' ? buildPptSessionVisualContext(session) : null
   return {
     fallbackTitle: mainTemplate?.originalName || 'Moonwalk PPT',
     pptType: session.pptType,
@@ -906,6 +939,8 @@ function buildPptAiContext(session) {
     }),
     structuredPagePlan: session.structuredPagePlan || null,
     templates: buildTemplateContext(session.templates),
+    visualContext,
+    imageGenerationEnabled: session.aiProviderId === 'openai',
   }
 }
 
@@ -1986,6 +2021,71 @@ function mergeStructuredMasterColors(structuredMasters, mainTemplate) {
   return uniqueStrings(colors).slice(0, 8)
 }
 
+function buildPptSessionVisualContext(session) {
+  if (session.aiProviderId !== 'openai') return null
+  const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
+  const auxiliaryTemplates = session.templates.filter((template) => template.id !== mainTemplate?.id)
+  const contexts = []
+
+  contexts.push(sliceVisualContext(session.contentVisualContext, 3))
+
+  for (const role of STRUCTURED_MASTER_ROLES) {
+    const master = session.structuredMasters?.[role.key]
+    if (!master) continue
+    contexts.push(visualContextFromPreviewPaths({
+      paths: master.previewPaths,
+      label: `${role.label}：${master.originalName}`,
+      kind: `ppt-master-${role.key}`,
+      maxPages: 1,
+    }))
+  }
+
+  if (session.master) {
+    contexts.push(visualContextFromPreviewPaths({
+      paths: session.master.previewPaths,
+      label: `幻灯片母版：${session.master.originalName}`,
+      kind: 'ppt-master',
+      maxPages: 3,
+    }))
+  }
+
+  if (mainTemplate) {
+    contexts.push(visualContextFromPreviewPaths({
+      paths: mainTemplate.previewPaths,
+      label: `主模板：${mainTemplate.originalName}`,
+      kind: 'ppt-main-template',
+      maxPages: 3,
+    }))
+  }
+
+  auxiliaryTemplates.slice(0, 2).forEach((template) => {
+    contexts.push(visualContextFromPreviewPaths({
+      paths: template.previewPaths,
+      label: `辅助模板：${template.originalName}`,
+      kind: 'ppt-aux-template',
+      maxPages: 1,
+    }))
+  })
+
+  const visualContext = combineVisualContexts(...contexts)
+  if (!visualContext.pages.length && !visualContext.notes.length) return null
+  return {
+    ...visualContext,
+    notes: [
+      'GPT 模式已启用 PPT 视觉参考：请结合模板/母版预览理解版式、配色、图表、图片和页面层级。',
+      ...visualContext.notes,
+    ],
+  }
+}
+
+function sliceVisualContext(context, maxPages) {
+  if (!context) return null
+  return {
+    pages: Array.isArray(context.pages) ? context.pages.slice(0, maxPages) : [],
+    notes: Array.isArray(context.notes) ? context.notes : [],
+  }
+}
+
 function normalizeTextList(value) {
   return Array.isArray(value)
     ? value.map((item) => String(item || '').trim()).filter(Boolean)
@@ -2026,6 +2126,9 @@ function serializePptSession(session) {
     revisionSummary: session.revisionSummary || null,
     narrativePlan: session.narrativePlan || null,
     templateDiagnostics: session.templateDiagnostics || null,
+    visualContext: session.aiProviderId === 'openai'
+      ? publicVisualContext(buildPptSessionVisualContext(session))
+      : null,
     master: session.master
       ? {
           originalName: session.master.originalName,
@@ -2117,7 +2220,7 @@ function buildFeedbackContext(session, settings, aiProvider) {
   return {
     aiProvider,
     fileInfo: session.fileInfo,
-    prepared: session.prepared,
+    prepared: publicPreparedContext(session.prepared),
     summary: session.summary,
     writingGoal: settings.writingGoal,
     questionSet: null,
@@ -2161,4 +2264,13 @@ function normalizeFeedbackContext(value) {
 function toUserError(error) {
   if (error instanceof Error) return error.message
   return '处理失败，请稍后重试。'
+}
+
+function publicPreparedContext(prepared) {
+  return {
+    textContext: String(prepared?.textContext || ''),
+    processingNotes: Array.isArray(prepared?.processingNotes)
+      ? prepared.processingNotes.map(String)
+      : [],
+  }
 }

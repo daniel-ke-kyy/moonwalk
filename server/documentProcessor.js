@@ -64,32 +64,39 @@ export async function inspectDocument(filePath, extension) {
   return { pageCount: null, slideCount: null }
 }
 
-export async function prepareDocumentForAi(filePath, _originalName, extension) {
+export async function prepareDocumentForAi(filePath, _originalName, extension, options = {}) {
+  const allowSparseText = Boolean(options.allowSparseText)
   if (extension === '.pdf') {
-    const textContext = await extractPdfText(filePath)
+    const textContext = await extractPdfText(filePath, { allowSparseText })
     return {
       textContext,
       processingNotes: [
-        'PDF 已本地提取可复制文字后交给所选 AI 分析。扫描版图片文字和复杂图表暂不参与理解。',
+        allowSparseText
+          ? 'PDF 已本地提取可复制文字，并会尽量为 GPT 提供页面截图以理解图片文字、图示、表格和版式。'
+          : 'PDF 已本地提取可复制文字后交给所选 AI 分析。扫描版图片文字和复杂图表暂不参与理解。',
       ],
     }
   }
 
   if (extension === '.docx') {
-    const textContext = await extractDocxText(filePath)
+    const textContext = await extractDocxText(filePath, { allowSparseText })
     return {
       textContext,
       processingNotes: [
-        'DOCX 已本地提取正文后交给所选 AI 分析。文档内图片和复杂图示暂不参与理解。',
+        allowSparseText
+          ? 'DOCX 已本地提取正文后交给 GPT 分析。第一版暂不渲染 DOCX 内嵌图片。'
+          : 'DOCX 已本地提取正文后交给所选 AI 分析。文档内图片和复杂图示暂不参与理解。',
       ],
     }
   }
 
-  const textContext = await extractPptxText(filePath)
+  const textContext = await extractPptxText(filePath, { allowSparseText })
   return {
     textContext,
     processingNotes: [
-      'PPTX 已本地提取幻灯片文字后交给所选 AI 分析。图片、流程图和截图文字暂不参与理解。',
+      allowSparseText
+        ? 'PPTX 已本地提取幻灯片文字，并会尽量为 GPT 提供页面截图以理解图片、流程图、表格和版式。'
+        : 'PPTX 已本地提取幻灯片文字后交给所选 AI 分析。图片、流程图和截图文字暂不参与理解。',
     ],
   }
 }
@@ -107,23 +114,23 @@ export function getPptxSlideCount(filePath) {
     .filter((entry) => /^ppt\/slides\/slide\d+\.xml$/.test(entry.entryName)).length
 }
 
-export async function extractPdfText(filePath) {
+export async function extractPdfText(filePath, options = {}) {
   const buffer = await readFile(filePath)
   const parserInstance = new PDFParse({ data: buffer })
   try {
     const result = await parserInstance.getText()
-    return ensureTextContext(trimText(result.text || '', 40000), 'PDF')
+    return ensureTextContext(trimText(result.text || '', 40000), 'PDF', options)
   } finally {
     await parserInstance.destroy()
   }
 }
 
-export async function extractDocxText(filePath) {
+export async function extractDocxText(filePath, options = {}) {
   const result = await mammoth.convertToMarkdown({ path: filePath })
-  return ensureTextContext(trimText(result.value || '', 40000), 'DOCX')
+  return ensureTextContext(trimText(result.value || '', 40000), 'DOCX', options)
 }
 
-export async function extractPptxText(filePath) {
+export async function extractPptxText(filePath, options = {}) {
   const zip = new AdmZip(filePath)
   const slides = zip
     .getEntries()
@@ -137,12 +144,12 @@ export async function extractPptxText(filePath) {
     return `第 ${index + 1} 页：${text || '未提取到文字'}`
   })
 
-  return ensureTextContext(trimText(slideTexts.join('\n'), 40000), 'PPTX')
+  return ensureTextContext(trimText(slideTexts.join('\n'), 40000), 'PPTX', options)
 }
 
-export async function extractPlainText(filePath) {
+export async function extractPlainText(filePath, options = {}) {
   const text = await readFile(filePath, 'utf8')
-  return ensureTextContext(trimText(text || '', 40000), 'TXT')
+  return ensureTextContext(trimText(text || '', 40000), 'TXT', options)
 }
 
 function getSlideNumber(entryName) {
@@ -179,8 +186,11 @@ function trimText(text, maxLength) {
   return text.length > maxLength ? `${text.slice(0, maxLength)}\n...（内容已截断）` : text
 }
 
-function ensureTextContext(text, label) {
+function ensureTextContext(text, label, options = {}) {
   if (!text || text.replace(/\s/g, '').length < 20) {
+    if (options.allowSparseText) {
+      return `${label} 未提取到足够可复制文字。请结合可用页面截图、图示、表格、图片文字和版式信息谨慎理解；如果没有视觉上下文，不要编造文件中不存在的内容。`
+    }
     throw new Error(`${label} 未提取到足够文字。DeepSeek API 目前不支持直接理解文件图片，请换用可复制文字的材料。`)
   }
   return text

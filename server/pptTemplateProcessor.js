@@ -106,8 +106,9 @@ export async function analyzeStructuredMasterFiles(files, sessionDir) {
   return masters
 }
 
-export async function extractContentFileText(file) {
+export async function extractContentFileText(file, options = {}) {
   if (!file) return { text: '', fileInfo: null }
+  const allowSparseText = Boolean(options.allowSparseText)
   const originalName = normalizeUploadFilename(file.originalname)
   const extension = getExtension(originalName)
   if (!contentExtensions.has(extension)) {
@@ -133,17 +134,17 @@ export async function extractContentFileText(file) {
   }
 
   let text = ''
-  if (extension === '.txt') text = await extractPlainText(file.path)
-  if (extension === '.docx') text = await extractDocxText(file.path)
+  if (extension === '.txt') text = await extractPlainText(file.path, { allowSparseText })
+  if (extension === '.docx') text = await extractDocxText(file.path, { allowSparseText })
   if (extension === '.pdf') {
     const pageCount = await getPdfPageCount(file.path)
     if (pageCount > MAX_PDF_PAGES) throw new Error(`内容 PDF 共 ${pageCount} 页，超过 100 页限制。`)
-    text = await extractPdfText(file.path)
+    text = await extractPdfText(file.path, { allowSparseText })
   }
   if (extension === '.pptx') {
     const slideCount = getPptxSlideCount(file.path)
     if (slideCount > MAX_PPTX_SLIDES) throw new Error(`内容 PPTX 共 ${slideCount} 页，超过 100 页限制。`)
-    text = await extractPptxText(file.path)
+    text = await extractPptxText(file.path, { allowSparseText })
   }
 
   const result = {

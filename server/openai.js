@@ -5,6 +5,7 @@ import {
   normalizeSummary,
   parseJsonResponse,
 } from './deepseek.js'
+import { readFile } from 'node:fs/promises'
 import {
   buildPptNarrativePlanPrompt,
   buildPptPartialRevisionPrompt,
@@ -22,6 +23,7 @@ import { normalizeTemplateFillPlan } from './pptTemplateFill.js'
 const OPENAI_API_URL = normalizeOpenAiApiUrl()
 const modelName = process.env.OPENAI_MODEL || 'gpt-5.5'
 const reasoningEffort = process.env.OPENAI_REASONING_EFFORT || 'low'
+const maxVisualPages = Number(process.env.OPENAI_MAX_VISUAL_PAGES || 8)
 
 export function hasAiKey() {
   return Boolean(process.env.OPENAI_API_KEY)
@@ -44,7 +46,7 @@ export async function analyzeMaterial(prepared, fileInfo) {
     temperature: 0.2,
     maxTokens: 4096,
     instructions:
-      '你是中文学习材料分析助手。你只能根据用户提供的文本内容分析，不要编造材料之外的信息。必须只输出有效 JSON。',
+      '你是中文学习材料分析助手。你要结合用户提供的文本和页面截图理解材料；如果截图可用，需要识别图片里的文字、图示、表格和版式含义。不要编造材料之外的信息。必须只输出有效 JSON。',
     input: `请分析这份材料，并只返回 JSON。
 
 材料文件：${fileInfo.originalName}
@@ -72,7 +74,9 @@ JSON 要求：
 1. 统一使用中文。
 2. keyPoints 数量控制在 3 到 16 个。
 3. sections 如果没有明确章节，请按主题模块组织。
-4. importance 只能是 high、medium、low。`,
+4. importance 只能是 high、medium、low。
+5. 如果提供了页面截图，请把截图中可见的文字、图示、流程图、表格和图片含义也纳入分析。`,
+    visualContext: prepared.visualContext,
   })
 
   return normalizeSummary(parseJsonResponse(payload, 'GPT-5.5'))
@@ -115,6 +119,7 @@ ${JSON.stringify(selectedPoints, null, 2)}
 - 不要生成超出材料依据的题目。
 - id 使用 q1、q2 这样的稳定编号。
 - type 只能是 single 或 multiple。
+- 如果提供了页面截图，可基于截图中明确可见的文字、图示、流程图、表格和图片含义出题，但不要臆测截图外的信息。
 
 JSON 格式：
 {
@@ -135,6 +140,7 @@ JSON 格式：
     }
   ]
 }`,
+    visualContext: session.prepared.visualContext,
   })
 
   return normalizeQuiz(parseJsonResponse(payload, 'GPT-5.5'), settings.questionCount, 'GPT-5.5')
@@ -176,6 +182,7 @@ ${JSON.stringify(selectedSections, null, 2)}
 - 不要判断对错，不要给选择题选项。
 - sourceRef 必须引用原文位置。能识别章节、页码或幻灯片时写清楚；否则写“原文片段附近”并给出短摘录。
 - excerpt 必须来自材料原文，不要编造。
+- 如果提供了页面截图，可针对截图中的图示、表格、版式暗示和图片含义追问；sourceRef 要标明对应页码/幻灯片。
 - target 是给系统用的内部批判目标，简洁说明这个问题实际刺向哪里。
 - id 使用 oq1、oq2 这样的稳定编号。
 
@@ -194,6 +201,7 @@ JSON 格式：
     }
   ]
 }`,
+    visualContext: session.prepared.visualContext,
   })
 
   return normalizeOpenQuestions(parseJsonResponse(payload, 'GPT-5.5'), settings.questionCount, 'GPT-5.5')
@@ -240,6 +248,7 @@ ${JSON.stringify(answerItems, null, 2)}
 - 反馈必须具体引用原问题的原文位置或摘录，不要泛泛地说“需要加强论证”。
 - 不要攻击作者本人，只批评文本和回答。
 - 每条 feedback 必须对应一个 questionId。
+- 如果提供了页面截图，可结合截图中的图示、表格和图片含义判断回答是否补足论证。
 
 JSON 格式：
 {
@@ -261,6 +270,7 @@ JSON 格式：
     }
   ]
 }`,
+    visualContext: prepared.visualContext,
   })
 
   return normalizeOpenFeedback(parseJsonResponse(payload, 'GPT-5.5'), answerItems)
@@ -273,6 +283,7 @@ export async function generatePptPlan(context) {
     instructions:
       '你是中文 PPT 内容策划助手。你只负责生成页面计划 JSON，不生成图片，不输出 Markdown。必须只输出有效 JSON。',
     input: buildPptPlanPrompt(context),
+    visualContext: context.visualContext,
   })
 
   return normalizePptPlan(parseJsonResponse(payload, 'GPT-5.5'), context.slideCount, context.fallbackTitle)
@@ -285,6 +296,7 @@ export async function generatePptNarrativePlan(context) {
     instructions:
       '你是中文 PPT 内容架构师。你只负责先生成内容叙事大纲和页面策略 JSON，不选择模板页，不输出 Markdown。必须只输出有效 JSON。',
     input: buildPptNarrativePlanPrompt(context),
+    visualContext: context.visualContext,
   })
 
   return normalizePptNarrativePlan(parseJsonResponse(payload, 'GPT-5.5'), context.slideCount, context.fallbackTitle)
@@ -297,6 +309,7 @@ export async function generatePptTemplateFillPlan(context) {
     instructions:
       '你是中文 PPT 模板填充策划助手。你只负责根据模板页面库生成 fill_plan JSON，不生成图片，不输出 Markdown。必须只输出有效 JSON。',
     input: buildPptTemplateFillPrompt(context),
+    visualContext: context.visualContext,
   })
 
   return normalizeTemplateFillPlan(parseJsonResponse(payload, 'GPT-5.5'), context.templateFillLibraryRaw, context.slideCount)
@@ -309,6 +322,7 @@ export async function revisePptPlan(context) {
     instructions:
       '你是中文 PPT 修改助手。你只根据修改意见调整页面计划 JSON，不生成图片，不输出 Markdown。必须只输出有效 JSON。',
     input: buildPptRevisionPrompt(context),
+    visualContext: context.visualContext,
   })
 
   return normalizePptPlan(parseJsonResponse(payload, 'GPT-5.5'), context.slideCount, context.fallbackTitle)
@@ -321,6 +335,7 @@ export async function revisePptPlanPartial(context) {
     instructions:
       '你是中文 PPT 局部修改助手。你只能返回用户要求修改的页面 JSON，不生成整套 PPT，不输出 Markdown。必须只输出有效 JSON。',
     input: buildPptPartialRevisionPrompt(context),
+    visualContext: context.visualContext,
   })
 
   return mergePartialPptPlan(
@@ -339,50 +354,70 @@ export async function checkPptQuality(context) {
     instructions:
       '你是中文 PPT 质量审稿人。你要直接、具体、严格，只输出质量自检 JSON，不输出 Markdown。',
     input: buildPptQualityCheckPrompt(context),
+    visualContext: context.visualContext,
   })
 
   return normalizePptQualityCheck(parseJsonResponse(payload, 'GPT-5.5'), context.plan)
 }
 
-async function callOpenAi({ instructions, input, temperature, maxTokens }) {
+async function callOpenAi({ instructions, input, temperature, maxTokens, visualContext = null, tools = null }) {
   if (!hasAiKey()) {
     throw new Error('还没有配置 OPENAI_API_KEY。请先配置 OpenAI API Key，或切换到 DeepSeek 重试。')
   }
 
-  const response = await fetch(OPENAI_API_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
+  const visualInput = await buildOpenAiInput(input, visualContext)
+  const usedVisualInput = Array.isArray(visualInput)
+  const body = {
+    model: modelName,
+    instructions,
+    input: visualInput,
+    temperature,
+    max_output_tokens: maxTokens,
+    reasoning: {
+      effort: reasoningEffort,
     },
-    body: JSON.stringify({
-      model: modelName,
-      instructions,
-      input,
-      temperature,
-      max_output_tokens: maxTokens,
-      reasoning: {
-        effort: reasoningEffort,
+    text: {
+      format: {
+        type: 'json_object',
       },
-      text: {
-        format: {
-          type: 'json_object',
-        },
-      },
-    }),
-  })
-
-  const json = await response.json().catch(() => null)
-  if (!response.ok) {
-    const rawMessage = json?.error?.message || json?.message || 'OpenAI API 调用失败。'
-    throw new Error(`GPT-5.5 调用失败：${rawMessage}。你可以切换到 DeepSeek 重试。`)
+    },
+    ...(Array.isArray(tools) && tools.length ? { tools } : {}),
   }
+  const json = await sendOpenAiRequest(body).catch(async (error) => {
+    if (!usedVisualInput || !isVisualInputFallbackError(error)) throw error
+    console.warn(`GPT-5.5 视觉输入暂不可用，已自动退回文本理解：${error.message}`)
+    return sendOpenAiRequest({
+      ...body,
+      input: appendVisualFallbackNote(input, visualContext, error.message),
+    })
+  })
 
   const content = extractResponseText(json)
   if (!content) {
     throw new Error('GPT-5.5 没有返回内容。你可以切换到 DeepSeek 重试。')
   }
   return content
+}
+
+async function sendOpenAiRequest(body) {
+  const response = await fetch(OPENAI_API_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+
+  const json = await response.json().catch(() => null)
+  if (!response.ok) {
+    const rawMessage = json?.error?.message || json?.message || 'OpenAI API 调用失败。'
+    const error = new Error(`GPT-5.5 调用失败：${rawMessage}。你可以切换到 DeepSeek 重试。`)
+    error.status = response.status
+    error.rawMessage = rawMessage
+    throw error
+  }
+  return json
 }
 
 function extractResponseText(json) {
@@ -399,6 +434,66 @@ function extractResponseText(json) {
   }
 
   return chunks.join('\n').trim()
+}
+
+async function buildOpenAiInput(text, visualContext) {
+  const pages = (visualContext?.pages || []).slice(0, maxVisualPages)
+  if (!pages.length) return text
+
+  const content = [
+    {
+      type: 'input_text',
+      text: [
+        text,
+        '',
+        '以下页面截图是同一任务的视觉上下文。请结合截图中可见的文字、图示、流程图、表格、图片含义和版式信息进行理解；如果截图和提取文字冲突，以截图中清晰可见的信息为准。',
+        ...(visualContext?.notes || []).map((note) => `- ${note}`),
+      ].join('\n'),
+    },
+  ]
+
+  for (const page of pages) {
+    try {
+      const imageUrl = await imagePathToDataUrl(page.imagePath, page.mimeType)
+      content.push({
+        type: 'input_text',
+        text: `视觉页：${page.label || `第 ${page.pageNumber || content.length} 页`}`,
+      })
+      content.push({
+        type: 'input_image',
+        image_url: imageUrl,
+      })
+    } catch (error) {
+      content.push({
+        type: 'input_text',
+        text: `视觉页读取失败：${page.label || page.imagePath}（${error.message}）`,
+      })
+    }
+  }
+
+  return [{ role: 'user', content }]
+}
+
+async function imagePathToDataUrl(imagePath, mimeType = 'image/png') {
+  const data = await readFile(imagePath)
+  return `data:${mimeType || 'image/png'};base64,${data.toString('base64')}`
+}
+
+function isVisualInputFallbackError(error) {
+  const message = String(error?.rawMessage || error?.message || '')
+  return Boolean(error?.status === 400 || error?.status === 415 || error?.status === 422 || error?.status === 503)
+    || /input_image|image|vision|multimodal|供应商暂时不可用|暂时不可用|unsupported/i.test(message)
+}
+
+function appendVisualFallbackNote(text, visualContext, reason) {
+  const notes = [
+    text,
+    '',
+    '注意：本次 GPT 视觉输入通道暂时不可用，系统已自动退回文本理解。',
+    `降级原因：${reason}`,
+    ...(visualContext?.notes || []).map((note) => `- ${note}`),
+  ]
+  return notes.join('\n')
 }
 
 function normalizeOpenAiApiUrl() {
