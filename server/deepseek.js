@@ -1,9 +1,13 @@
 import { emptyMaterialSummary } from './types.js'
 import {
+  buildPptPartialRevisionPrompt,
   buildPptPlanPrompt,
+  buildPptQualityCheckPrompt,
   buildPptRevisionPrompt,
   buildPptTemplateFillPrompt,
+  mergePartialPptPlan,
   normalizePptPlan,
+  normalizePptQualityCheck,
 } from './pptPlan.js'
 import { normalizeTemplateFillPlan } from './pptTemplateFill.js'
 
@@ -344,6 +348,52 @@ export async function revisePptPlan(context) {
   })
 
   return normalizePptPlan(parseJsonResponse(payload), context.slideCount, context.fallbackTitle)
+}
+
+export async function revisePptPlanPartial(context) {
+  const payload = await callDeepSeek({
+    temperature: 0.3,
+    maxTokens: Math.max(4096, context.slideComments.length * 1200),
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是中文 PPT 局部修改助手。你只能返回用户要求修改的页面 JSON，不生成整套 PPT，不输出 Markdown。必须只输出有效 JSON。',
+      },
+      {
+        role: 'user',
+        content: buildPptPartialRevisionPrompt(context),
+      },
+    ],
+  })
+
+  return mergePartialPptPlan(
+    context.currentPlan,
+    parseJsonResponse(payload),
+    context.slideComments,
+    context.slideCount,
+    context.fallbackTitle,
+  )
+}
+
+export async function checkPptQuality(context) {
+  const payload = await callDeepSeek({
+    temperature: 0.2,
+    maxTokens: 4096,
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是中文 PPT 质量审稿人。你要直接、具体、严格，只输出质量自检 JSON，不输出 Markdown。',
+      },
+      {
+        role: 'user',
+        content: buildPptQualityCheckPrompt(context),
+      },
+    ],
+  })
+
+  return normalizePptQualityCheck(parseJsonResponse(payload), context.plan)
 }
 
 async function callDeepSeek({ messages, temperature, maxTokens }) {

@@ -166,6 +166,118 @@ ${context.master ? JSON.stringify(context.master, null, 2) : '无'}
 7. 只返回 JSON，格式与原页面计划一致。`
 }
 
+export function buildPptPartialRevisionPrompt(context) {
+  return `请根据用户逐页修改意见，只修改指定页面，并只返回 JSON。
+
+这是局部修改任务，不是重新生成整套 PPT。你只能返回用户有修改意见的页面。
+
+整套 PPT 页数：${context.slideCount}
+生成模式：${context.mode}
+PPT 类型：${context.pptType}
+主模板：${context.mainTemplateName}
+
+整套页面计划：
+${JSON.stringify(context.currentPlan, null, 2)}
+
+需要修改的页面：
+${JSON.stringify(context.targetSlides, null, 2)}
+
+用户逐页修改意见：
+${JSON.stringify(context.slideComments, null, 2)}
+
+原始内容文本：
+${context.contentText || '无'}
+
+制作需求：
+${context.requirements || '无'}
+
+幻灯片母版要求（最高优先级）：
+${context.master ? JSON.stringify(context.master, null, 2) : '无'}
+
+要求：
+1. 只返回有修改意见的页面，不要返回未修改页面。
+2. slideNumber 必须对应原页码，不能新增、删除或调换页面。
+3. 未被用户要求改变的标题、版式、语气、备注和内容尽量保持。
+4. 修改必须具体落实用户意见，不要只做同义改写。
+5. 不生成新图片，不要求新增无法落地的元素。
+6. layout 只能从 cover、agenda、section、content、two_column、comparison、timeline、quote、summary 中选择。
+7. emphasis 只能从 calm、sharp、warm、formal 中选择。
+8. 如果上传了母版，继续优先保留母版视觉结构，只调整该页文本内容。
+
+JSON 格式：
+{
+  "slides": [
+    {
+      "slideNumber": 2,
+      "title": "修改后的页面标题",
+      "subtitle": "修改后的副标题",
+      "layout": "content",
+      "emphasis": "warm",
+      "bullets": ["修改后的要点 1", "修改后的要点 2"],
+      "footer": "页脚",
+      "speakerNotes": "演讲备注"
+    }
+  ]
+}`
+}
+
+export function buildPptQualityCheckPrompt(context) {
+  return `请对这份中文 PPT 生成结果做质量自检，并只返回 JSON。
+
+你要像严格的 PPT 审稿人一样检查，不要客套。只评价页面计划和生成约束，不要声称看到了最终图片之外的细节。
+
+生成目标：
+- PPT 类型：${context.pptType}
+- 生成模式：${context.mode}
+- 页数：${context.slideCount}
+- 主模板：${context.mainTemplateName}
+
+用户输入内容：
+${context.contentText || '用户未提供明确内容。'}
+
+用户上传内容文件提取文本：
+${context.contentFileText || '无'}
+
+制作需求：
+${context.requirements || '无'}
+
+模板/母版约束：
+${context.master ? JSON.stringify(context.master, null, 2) : '未提供母版。'}
+
+最终页面计划：
+${JSON.stringify(context.plan, null, 2)}
+
+渲染与模板检查信息：
+${JSON.stringify(context.renderInfo || {}, null, 2)}
+
+检查维度：
+1. 是否贴合用户内容和制作需求。
+2. 是否保留模板/母版优先级。
+3. 页数、结构、标题层级是否清晰。
+4. 单页文字量是否可能过多。
+5. 是否存在内容空泛、重复、逻辑跳跃或结论不足。
+6. 如果有模板填充检查 warning/error，要指出风险。
+
+JSON 格式：
+{
+  "score": 0-100,
+  "summary": "一句话总体评价",
+  "passed": true,
+  "issues": [
+    {
+      "severity": "high|medium|low",
+      "slideNumber": 2,
+      "title": "问题标题",
+      "detail": "具体问题",
+      "suggestion": "具体修正建议"
+    }
+  ],
+  "checks": [
+    {"label": "内容贴合", "status": "pass|warn|fail", "detail": "判断依据"}
+  ]
+}`
+}
+
 export function normalizePptPlan(value, expectedCount, fallbackTitle = 'Moonwalk PPT') {
   const slides = Array.isArray(value?.slides) ? value.slides : []
   const normalizedSlides = slides.slice(0, expectedCount).map((slide, index) => normalizeSlide(slide, index))
@@ -184,6 +296,60 @@ export function normalizePptPlan(value, expectedCount, fallbackTitle = 'Moonwalk
       backgroundColor: normalizeHex(theme.backgroundColor, 'FFF7EE'),
     },
     slides: normalizedSlides,
+  }
+}
+
+export function mergePartialPptPlan(currentPlan, partialValue, slideComments, expectedCount, fallbackTitle = 'Moonwalk PPT') {
+  const basePlan = normalizePptPlan(currentPlan, expectedCount, fallbackTitle)
+  const allowedSlideNumbers = new Set(slideComments.map((item) => Number(item.slideNumber)).filter(Boolean))
+  const partialSlides = Array.isArray(partialValue?.slides) ? partialValue.slides : []
+  const mergedSlides = [...basePlan.slides]
+
+  partialSlides.forEach((slide) => {
+    const slideNumber = Number(slide?.slideNumber)
+    if (!allowedSlideNumbers.has(slideNumber)) return
+    const index = slideNumber - 1
+    if (index < 0 || index >= mergedSlides.length) return
+    mergedSlides[index] = normalizeSlide({
+      ...mergedSlides[index],
+      ...slide,
+    }, index)
+  })
+
+  return {
+    ...basePlan,
+    title: String(partialValue?.title || basePlan.title || fallbackTitle),
+    subtitle: String(partialValue?.subtitle || basePlan.subtitle || ''),
+    slides: mergedSlides,
+  }
+}
+
+export function normalizePptQualityCheck(value, plan) {
+  const issues = Array.isArray(value?.issues) ? value.issues : []
+  const checks = Array.isArray(value?.checks) ? value.checks : []
+  const normalizedIssues = issues.slice(0, 10).map((issue) => ({
+    severity: ['high', 'medium', 'low'].includes(issue?.severity) ? issue.severity : 'medium',
+    slideNumber: normalizeSlideNumber(issue?.slideNumber, plan?.slides?.length),
+    title: String(issue?.title || '需要检查的问题'),
+    detail: String(issue?.detail || ''),
+    suggestion: String(issue?.suggestion || ''),
+  }))
+  const normalizedChecks = checks.slice(0, 8).map((check) => ({
+    label: String(check?.label || '质量检查'),
+    status: ['pass', 'warn', 'fail'].includes(check?.status) ? check.status : 'warn',
+    detail: String(check?.detail || ''),
+  }))
+  const score = Number(value?.score)
+
+  return {
+    score: Number.isFinite(score) ? Math.max(0, Math.min(100, Math.round(score))) : inferQualityScore(normalizedIssues),
+    summary: String(value?.summary || '已完成质量自检。'),
+    passed: typeof value?.passed === 'boolean'
+      ? value.passed
+      : !normalizedIssues.some((issue) => issue.severity === 'high'),
+    issues: normalizedIssues,
+    checks: normalizedChecks,
+    generatedAt: new Date().toISOString(),
   }
 }
 
@@ -206,6 +372,22 @@ function normalizeSlide(slide, index) {
     footer: String(slide?.footer || ''),
     speakerNotes: String(slide?.speakerNotes || ''),
   }
+}
+
+function normalizeSlideNumber(value, total) {
+  const number = Number(value)
+  if (!Number.isInteger(number) || number < 1) return null
+  if (total && number > total) return total
+  return number
+}
+
+function inferQualityScore(issues) {
+  const penalty = issues.reduce((total, issue) => {
+    if (issue.severity === 'high') return total + 18
+    if (issue.severity === 'medium') return total + 9
+    return total + 4
+  }, 0)
+  return Math.max(55, 92 - penalty)
 }
 
 function normalizeStringList(value) {

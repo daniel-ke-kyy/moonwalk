@@ -1504,6 +1504,150 @@ legend {
   display: block;
 }
 
+.ppt-quality-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.ppt-quality-panel.compact {
+  margin-bottom: 18px;
+}
+
+.ppt-quality-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.ppt-quality-head h2 {
+  margin: 4px 0 0;
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1.35;
+}
+
+.quality-score {
+  display: grid;
+  place-items: center;
+  min-width: 82px;
+  padding: 10px 12px;
+  background: #fff7ee;
+  border: 1px solid #efd7bd;
+  border-radius: 8px;
+}
+
+.quality-score strong {
+  color: #7b4a25;
+  font-size: 28px;
+  line-height: 1;
+}
+
+.quality-score span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.quality-score.passed {
+  background: #f0fbf4;
+  border-color: #c9e8d3;
+}
+
+.quality-score.passed strong {
+  color: #2f6b48;
+}
+
+.quality-score.warning strong {
+  color: #b86232;
+}
+
+.revision-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  color: #765235;
+  background: #fff8ef;
+  border: 1px solid #efd7bd;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.quality-check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.quality-check {
+  display: grid;
+  gap: 5px;
+  padding: 11px;
+  background: #fffbf6;
+  border: 1px solid #f0ddc9;
+  border-left-width: 4px;
+  border-radius: 8px;
+}
+
+.quality-check.pass {
+  border-left-color: #3d8c62;
+}
+
+.quality-check.warn {
+  border-left-color: #d08a3c;
+}
+
+.quality-check.fail {
+  border-left-color: #c7523a;
+}
+
+.quality-check strong,
+.quality-issue strong {
+  color: #71472a;
+}
+
+.quality-check span,
+.quality-issue p,
+.quality-issue small {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.quality-issues {
+  display: grid;
+  gap: 10px;
+}
+
+.quality-issue {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  background: #fffbf6;
+  border: 1px solid #f0ddc9;
+  border-left: 4px solid #d08a3c;
+  border-radius: 8px;
+}
+
+.quality-issue.high {
+  border-left-color: #c7523a;
+}
+
+.quality-issue.low {
+  border-left-color: #3d8c62;
+}
+
+.quality-issue span {
+  color: #9a6a43;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.quality-issue p {
+  margin: 0;
+}
+
 .spin {
   animation: spin 0.9s linear infinite;
 }

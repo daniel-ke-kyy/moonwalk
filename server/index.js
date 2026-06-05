@@ -292,13 +292,9 @@ app.post('/api/ppt/revise', async (req, res) => {
     const job = createPptJob(session.id, 'revise')
     runPptJob(job, async ({ update }) => {
       update('正在读取每页修改意见。')
-      const plan = await aiProvider.module.revisePptPlan({
-        ...buildPptAiContext(session),
-        currentPlan: session.plan,
-        slideComments: settings.slideComments,
-      })
-      update('AI 已返回修改方案，正在重新渲染 PPT。')
-      await renderPptSessionOutput(session, plan, { engine: 'fallback', update })
+      const plan = await revisePptSessionPlan(session, aiProvider, settings.slideComments, update)
+      update('局部修改已合并，正在重新渲染 PPT。')
+      await renderRevisedPptSessionOutput(session, aiProvider, plan, settings.slideComments, update)
       return serializePptSession(session)
     })
     res.json(serializePptJob(job))
@@ -358,7 +354,10 @@ async function analyzePptUploadSession({ aiProvider, files, body, sessionId, ses
     slideCount: null,
     mainTemplateId: templates[0]?.id || null,
     plan: null,
+    templateFillPlan: null,
     output: null,
+    qualityCheck: null,
+    revisionSummary: null,
     cacheSummary: {
       templateHits: cachedTemplateCount,
       templateTotal: templates.length,
@@ -804,6 +803,7 @@ async function generatePptSessionOutput(session, aiProvider, update = () => {}) 
     try {
       update('正在尝试使用模板填充引擎复用原 PPT 结构。')
       await renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update)
+      await runPptQualityCheck(session, aiProvider, update)
       return
     } catch (error) {
       console.warn(`PPT Master template-fill 失败，回退到原生成器：${toUserError(error)}`)
@@ -816,9 +816,72 @@ async function generatePptSessionOutput(session, aiProvider, update = () => {}) 
   const plan = await aiProvider.module.generatePptPlan(buildPptAiContext(session))
   update('AI 已返回页面方案，正在生成 PPTX。')
   await renderPptSessionOutput(session, plan, { engine: 'fallback', update })
+  await runPptQualityCheck(session, aiProvider, update)
 }
 
-async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update = () => {}) {
+async function revisePptSessionPlan(session, aiProvider, slideComments, update = () => {}) {
+  const context = {
+    ...buildPptAiContext(session),
+    currentPlan: session.plan,
+    slideComments,
+    targetSlides: slideComments.map((item) => ({
+      slideNumber: item.slideNumber,
+      comment: item.comment,
+      currentSlide: session.plan?.slides?.[item.slideNumber - 1] || null,
+    })),
+  }
+  if (typeof aiProvider.module.revisePptPlanPartial === 'function') {
+    update(`正在局部修改 ${slideComments.length} 页，其余页面保持不变。`)
+    const plan = await aiProvider.module.revisePptPlanPartial(context)
+    session.revisionSummary = {
+      mode: 'partial',
+      revisedSlides: slideComments.map((item) => item.slideNumber),
+      commentCount: slideComments.length,
+      updatedAt: new Date().toISOString(),
+    }
+    return plan
+  }
+
+  update('当前模型暂不支持局部修改，正在使用整套修改方案。')
+  const plan = await aiProvider.module.revisePptPlan(context)
+  session.revisionSummary = {
+    mode: 'full',
+    revisedSlides: slideComments.map((item) => item.slideNumber),
+    commentCount: slideComments.length,
+    updatedAt: new Date().toISOString(),
+  }
+  return plan
+}
+
+async function renderRevisedPptSessionOutput(session, aiProvider, plan, slideComments, update = () => {}) {
+  const mainTemplate = session.templates.find((template) => template.id === session.mainTemplateId) || session.templates[0]
+  const canUseTemplateFillRevision = session.output?.engine === 'template-fill'
+    && session.templateFillPlan
+    && mainTemplate?.extension === '.pptx'
+    && !session.master
+    && typeof aiProvider.module.generatePptTemplateFillPlan === 'function'
+
+  if (canUseTemplateFillRevision) {
+    try {
+      update('正在沿用模板填充引擎，只更新有修改意见的页面。')
+      await renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update, {
+        baseFillPlan: session.templateFillPlan,
+        targetSlideNumbers: slideComments.map((item) => item.slideNumber),
+        planOverride: plan,
+      })
+      await runPptQualityCheck(session, aiProvider, update)
+      return
+    } catch (error) {
+      console.warn(`PPT 局部模板填充修改失败，回退到普通渲染：${toUserError(error)}`)
+      update('模板填充局部修改不够稳定，正在回退到普通渲染。')
+    }
+  }
+
+  await renderPptSessionOutput(session, plan, { engine: 'fallback', update })
+  await runPptQualityCheck(session, aiProvider, update)
+}
+
+async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate, update = () => {}, options = {}) {
   const versionId = nanoid(8)
   const outputDir = path.join(session.sessionDir, 'outputs', versionId)
   const analysisDir = path.join(outputDir, 'template-fill')
@@ -832,12 +895,17 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   update('正在读取模板中的页面、文本框和版式元素。')
   const library = await loadTemplateFillLibrary(mainTemplate, libraryPath)
   const templateFillLibrary = pruneSlideLibraryForAi(library)
-  update('正在让 AI 生成逐页模板填充方案。')
-  const fillPlan = await aiProvider.module.generatePptTemplateFillPlan({
-    ...buildPptAiContext(session),
-    templateFillLibrary,
-    templateFillLibraryRaw: library,
-  })
+  let fillPlan = options.baseFillPlan ? clonePlain(options.baseFillPlan) : null
+  if (fillPlan && options.planOverride) {
+    fillPlan = mergeTemplateFillPlanWithPptPlan(fillPlan, options.planOverride, options.targetSlideNumbers)
+  } else {
+    update('正在让 AI 生成逐页模板填充方案。')
+    fillPlan = await aiProvider.module.generatePptTemplateFillPlan({
+      ...buildPptAiContext(session),
+      templateFillLibrary,
+      templateFillLibraryRaw: library,
+    })
+  }
   const replacementCount = fillPlan.slides.reduce((total, slide) => total + slide.replacements.length, 0)
   if (replacementCount < Math.max(3, Math.ceil(session.slideCount * 1.5))) {
     throw new Error('模板填充计划有效替换内容太少，已回退到普通生成。')
@@ -877,6 +945,7 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
   }
 
   session.plan = plan
+  session.templateFillPlan = fillPlan
   session.output = {
     versionId,
     engine: 'template-fill',
@@ -977,6 +1046,7 @@ async function renderPptSessionOutput(session, plan, options = {}) {
   }
 
   session.plan = plan
+  session.templateFillPlan = null
   session.output = {
     versionId,
     engine: options.engine || 'fallback',
@@ -984,6 +1054,68 @@ async function renderPptSessionOutput(session, plan, options = {}) {
     pdfPath,
     previewPaths,
     generatedAt: new Date().toISOString(),
+  }
+}
+
+async function runPptQualityCheck(session, aiProvider, update = () => {}) {
+  if (typeof aiProvider.module.checkPptQuality !== 'function' || !session.plan) {
+    session.qualityCheck = null
+    return
+  }
+  update('正在进行生成质量自检。')
+  try {
+    session.qualityCheck = await aiProvider.module.checkPptQuality({
+      ...buildPptAiContext(session),
+      plan: session.plan,
+      renderInfo: {
+        engine: session.output?.engine || 'fallback',
+        previewSource: session.output?.previewSource || session.output?.engine || 'fallback',
+        previewFallbackReason: session.output?.previewFallbackReason || '',
+        previewCount: session.output?.previewPaths?.length || 0,
+        templateFillCheck: session.output?.templateFill?.checkSummary || null,
+      },
+    })
+  } catch (error) {
+    console.warn(`PPT 质量自检失败：${toUserError(error)}`)
+    session.qualityCheck = {
+      score: 0,
+      summary: `质量自检暂时失败：${toUserError(error)}`,
+      passed: false,
+      issues: [],
+      checks: [],
+      generatedAt: new Date().toISOString(),
+    }
+  }
+}
+
+function mergeTemplateFillPlanWithPptPlan(fillPlan, plan, targetSlideNumbers = []) {
+  const targetSet = new Set(targetSlideNumbers.map(Number).filter(Boolean))
+  return {
+    ...fillPlan,
+    title: plan.title || fillPlan.title,
+    subtitle: plan.subtitle || fillPlan.subtitle,
+    slides: fillPlan.slides.map((slide, index) => {
+      const slideNumber = index + 1
+      if (!targetSet.has(slideNumber)) return slide
+      const planSlide = plan.slides[index]
+      if (!planSlide) return slide
+      const replacementTexts = [
+        planSlide.title,
+        planSlide.subtitle,
+        ...(planSlide.bullets || []),
+        planSlide.footer,
+      ].map((text) => String(text || '').trim()).filter(Boolean)
+      return {
+        ...slide,
+        purpose: planSlide.layout || slide.purpose,
+        layout: planSlide.layout || slide.layout,
+        notes: planSlide.speakerNotes || slide.notes,
+        replacements: slide.replacements.map((replacement, replacementIndex) => ({
+          ...replacement,
+          text: replacementTexts[replacementIndex] || replacement.text,
+        })),
+      }
+    }),
   }
 }
 
@@ -998,6 +1130,8 @@ function serializePptSession(session) {
     contentFileInfo: session.contentFileInfo,
     masterDescription: session.masterDescription,
     cacheSummary: session.cacheSummary || null,
+    qualityCheck: session.qualityCheck || null,
+    revisionSummary: session.revisionSummary || null,
     master: session.master
       ? {
           originalName: session.master.originalName,

@@ -223,6 +223,30 @@ type PptSessionResponse = {
     contentHit: boolean
     masterHit: boolean
   } | null
+  qualityCheck?: {
+    score: number
+    summary: string
+    passed: boolean
+    issues: Array<{
+      severity: 'high' | 'medium' | 'low'
+      slideNumber: number | null
+      title: string
+      detail: string
+      suggestion: string
+    }>
+    checks: Array<{
+      label: string
+      status: 'pass' | 'warn' | 'fail'
+      detail: string
+    }>
+    generatedAt: string
+  } | null
+  revisionSummary?: {
+    mode: 'partial' | 'full'
+    revisedSlides: number[]
+    commentCount: number
+    updatedAt: string
+  } | null
   master: {
     originalName: string
     extension: string
@@ -702,7 +726,7 @@ function App() {
 
     setError('')
     setIsRevisingPpt(true)
-    setPptProgress({ label: '重新生成', detail: '正在创建修改任务。' })
+    setPptProgress({ label: '局部修改', detail: '正在创建修改任务。' })
     try {
       const job = await fetchJson<PptJobResponse>('/api/ppt/revise', {
         method: 'POST',
@@ -713,11 +737,11 @@ function App() {
           slideComments,
         }),
       })
-      setPptProgress({ label: '重新生成', detail: job.message })
+      setPptProgress({ label: '局部修改', detail: job.message })
       const data = await waitForPptJob(job.jobId, {
         fallbackError: 'PPT 修改失败，请重试。',
         timeoutError: 'PPT 修改时间过长，请稍后刷新或重新生成。',
-        onProgress: (nextJob) => setPptProgress({ label: '重新生成', detail: nextJob.message }),
+        onProgress: (nextJob) => setPptProgress({ label: '局部修改', detail: nextJob.message }),
       })
       setPptSession(data)
       setPptSlideComments({})
@@ -2374,7 +2398,7 @@ function PptPreviewView({
           </button>
           <button className="secondary-button" disabled={isRevising} onClick={onRevise}>
             {isRevising ? <Loader2 className="spin" size={17} /> : <RefreshCcw size={17} />}
-            {isRevising ? '正在重新生成，可能需要几分钟' : '根据修改意见重新生成'}
+            {isRevising ? '正在局部修改，可能需要几分钟' : '局部修改并重新预览'}
           </button>
           <button className="primary-button" onClick={onFinal}>
             生成终稿
@@ -2391,6 +2415,7 @@ function PptPreviewView({
         />
       )}
       {isRevising && progress && <PptProgressNotice progress={progress} />}
+      <PptQualityPanel session={session} />
 
       <section className="ppt-slide-list">
         {previews.map((url, index) => (
@@ -2463,6 +2488,8 @@ function PptFinalView({
         </section>
       )}
 
+      <PptQualityPanel session={session} compact />
+
       <section className="ppt-slide-list compact">
         {previews.map((url, index) => (
           <article className="ppt-slide-card" key={url}>
@@ -2483,6 +2510,63 @@ function SourceReference({ sourceRef }: { sourceRef: SourceRef }) {
       <strong>{sourceRef.location || '原文片段附近'}</strong>
       <p>{sourceRef.excerpt || 'AI 未返回原文摘录。'}</p>
     </div>
+  )
+}
+
+function PptQualityPanel({ session, compact = false }: { session: PptSessionResponse; compact?: boolean }) {
+  const quality = session.qualityCheck
+  if (!quality) return null
+  const issueCount = quality.issues.length
+  const revisedSlides = session.revisionSummary?.revisedSlides || []
+
+  return (
+    <section className={`panel ppt-quality-panel ${compact ? 'compact' : ''}`}>
+      <div className="ppt-quality-head">
+        <div>
+          <span className="eyebrow">生成质量自检</span>
+          <h2>{quality.summary}</h2>
+        </div>
+        <div className={`quality-score ${quality.passed ? 'passed' : 'warning'}`}>
+          <strong>{quality.score}</strong>
+          <span>{quality.passed ? '通过' : '需注意'}</span>
+        </div>
+      </div>
+
+      {revisedSlides.length > 0 && (
+        <div className="revision-summary">
+          <RefreshCcw size={16} />
+          <span>
+            本次{session.revisionSummary?.mode === 'partial' ? '局部修改' : '整套修改'}了第 {revisedSlides.join('、')} 页。
+          </span>
+        </div>
+      )}
+
+      {!compact && (
+        <div className="quality-check-grid">
+          {quality.checks.map((check) => (
+            <div className={`quality-check ${check.status}`} key={`${check.label}-${check.detail}`}>
+              <strong>{check.label}</strong>
+              <span>{check.detail}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {issueCount > 0 ? (
+        <div className="quality-issues">
+          {quality.issues.slice(0, compact ? 3 : 10).map((issue, index) => (
+            <article className={`quality-issue ${issue.severity}`} key={`${issue.title}-${index}`}>
+              <span>{issue.slideNumber ? `第 ${issue.slideNumber} 页` : '整体'}</span>
+              <strong>{issue.title}</strong>
+              <p>{issue.detail}</p>
+              {issue.suggestion && <small>{issue.suggestion}</small>}
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="empty-state">自检没有发现明显高风险问题。</p>
+      )}
+    </section>
   )
 }
 
