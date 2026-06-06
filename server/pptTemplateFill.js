@@ -901,14 +901,31 @@ export function templateFillPlanToPptPlan(plan, fallbackTitle = 'Moonwalk PPT') 
       return {
         title: texts[0] || `第 ${index + 1} 页`,
         subtitle: '',
+        pageType: inferPptPageTypeFromTemplateFillSlide(slide, index, plan?.slides?.length || 1),
         layout: normalizeTemplateFillLayout(slide.layout, index),
         emphasis: 'formal',
+        insight: texts[0] || '',
         bullets: texts.slice(1, 6),
         footer: '',
         speakerNotes: String(slide.notes || ''),
       }
     }),
   }
+}
+
+function inferPptPageTypeFromTemplateFillSlide(slide, index, total) {
+  const purpose = String(slide?.purpose || slide?.layout || '')
+  if (purpose === 'cover') return 'cover'
+  if (purpose === 'agenda') return 'agenda'
+  if (purpose === 'section') return 'section'
+  if (purpose === 'comparison') return 'comparison'
+  if (purpose === 'timeline') return 'timeline'
+  if (purpose === 'quote') return 'quote'
+  if (purpose === 'summary') return index === total - 1 ? 'closing' : 'summary'
+  if (purpose === 'two_column') return 'argument'
+  if (index === 0) return 'cover'
+  if (index === total - 1) return 'closing'
+  return 'insight'
 }
 
 export function summarizeTemplateFillCheck(report) {

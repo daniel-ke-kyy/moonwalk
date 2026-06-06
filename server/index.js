@@ -26,6 +26,7 @@ import {
 } from './documentProcessor.js'
 import { createPptxFromPlan } from './pptDeckBuilder.js'
 import {
+  inferPptDesignIntent,
   PPT_MAX_SLIDES,
   PPT_MIN_SLIDES,
   PPT_MODES,
@@ -456,6 +457,7 @@ async function analyzePptUploadSession({ aiProvider, files, body, sessionId, ses
     mainTemplateId: templates[0]?.id || null,
     plan: null,
     narrativePlan: null,
+    designIntent: null,
     templateFillPlan: null,
     templateDiagnostics: null,
     output: null,
@@ -920,6 +922,9 @@ function applyPptSettings(session, settings) {
   session.contentText = settings.contentText
   session.requirements = settings.requirements
   session.masterDescription = settings.masterDescription
+  session.designIntent = inferPptDesignIntent(session)
+  session.structuredPagePlan = refineStructuredPagePlanWithDesignIntent(session.structuredPagePlan, session.designIntent)
+  session.slideCount = session.structuredPagePlan?.totalSlides || settings.slideCount
   session.templates = session.templates.map((template) => ({
     ...template,
     role: template.id === settings.mainTemplateId ? 'main' : 'auxiliary',
@@ -947,6 +952,7 @@ function buildPptAiContext(session) {
       roleSources: session.structuredRoleSources,
     }),
     structuredPagePlan: session.structuredPagePlan || null,
+    designIntent: session.designIntent || null,
     templates: buildTemplateContext(session.templates),
     visualContext,
     imageGenerationEnabled: session.aiProviderId === 'openai',
@@ -963,6 +969,9 @@ async function generatePptSessionOutput(session, aiProvider, update = () => {}, 
   if (templateFillSource && typeof aiProvider.module.generatePptTemplateFillPlan === 'function') {
     try {
       assertNotCancelled()
+      update(session.designIntent?.planningMode === 'execute_user_structure'
+        ? '正在识别用户指定结构，并按该结构规划 PPT。'
+        : '正在启动 PPT 设计导演层，规划整套叙事和页面类型。')
       update(templateFillSource.role === 'master'
         ? '正在直接编辑母版 PPTX 中的原始文本框。'
         : templateFillSource.role === 'structured-master'
@@ -991,7 +1000,9 @@ async function generatePptSessionOutput(session, aiProvider, update = () => {}, 
 
   assertNotCancelled()
   if (typeof aiProvider.module.generatePptNarrativePlan === 'function' && !session.narrativePlan) {
-    update('正在先理解内容，生成 PPT 叙事大纲和页面策略。')
+    update(session.designIntent?.planningMode === 'execute_user_structure'
+      ? '正在按用户指定结构生成 PPT 叙事大纲和页面策略。'
+      : '正在先理解内容，生成 PPT 叙事大纲和页面策略。')
     session.narrativePlan = await aiProvider.module.generatePptNarrativePlan(buildPptAiContext(session))
     assertNotCancelled()
   }
@@ -1120,7 +1131,9 @@ async function renderTemplateFillSessionOutput(session, aiProvider, mainTemplate
     fillPlan = mergeTemplateFillPlanWithPptPlan(fillPlan, options.planOverride, options.targetSlideNumbers)
   } else {
     if (typeof aiProvider.module.generatePptNarrativePlan === 'function') {
-      update('正在先理解内容，生成 PPT 叙事大纲和页面策略。')
+      update(session.designIntent?.planningMode === 'execute_user_structure'
+        ? '正在按用户指定结构生成 PPT 叙事大纲和页面策略。'
+        : '正在先理解内容，生成 PPT 叙事大纲和页面策略。')
       session.narrativePlan = await aiProvider.module.generatePptNarrativePlan({
         ...templateFillContext,
         templatePageProfiles,
@@ -1900,6 +1913,22 @@ function mergeTemplateFillPlanWithPptPlan(fillPlan, plan, targetSlideNumbers = [
 function buildStructuredPagePlan(contentSlideCount) {
   const contentCount = Math.max(PPT_MIN_SLIDES, Math.min(PPT_MAX_SLIDES, Number(contentSlideCount) || 10))
   const chapterCount = Math.max(1, Math.min(contentCount, 6, Math.ceil(contentCount / 4)))
+  return buildStructuredPagePlanWithChapters(contentCount, Array.from({ length: chapterCount }, (_, index) => `第 ${index + 1} 部分`))
+}
+
+function refineStructuredPagePlanWithDesignIntent(plan, designIntent) {
+  if (!plan) return plan
+  const contentCount = Math.max(PPT_MIN_SLIDES, Math.min(PPT_MAX_SLIDES, Number(plan.contentSlideCount) || 10))
+  const outline = Array.isArray(designIntent?.lockedOutline)
+    ? designIntent.lockedOutline.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+  if (outline.length < 2) return plan
+  const chapterTitles = outline.slice(0, Math.min(contentCount, 6))
+  return buildStructuredPagePlanWithChapters(contentCount, chapterTitles)
+}
+
+function buildStructuredPagePlanWithChapters(contentCount, chapterTitles) {
+  const chapterCount = Math.max(1, Math.min(contentCount, 6, chapterTitles.length || Math.ceil(contentCount / 4)))
   const baseSize = Math.floor(contentCount / chapterCount)
   const extraCount = contentCount % chapterCount
   const chapterSizes = Array.from({ length: chapterCount }, (_, index) => baseSize + (index < extraCount ? 1 : 0))
@@ -1920,7 +1949,7 @@ function buildStructuredPagePlan(contentSlideCount) {
     const chapterIndex = chapterOffset + 1
     const chapter = {
       chapterIndex,
-      title: `第 ${chapterIndex} 部分`,
+      title: chapterTitles[chapterOffset] || `第 ${chapterIndex} 部分`,
       sectionSlideNumber: slides.length + 1,
       contentStart: contentIndex + 1,
       contentEnd: contentIndex + size,
@@ -2344,6 +2373,7 @@ function serializePptSession(session) {
     cacheSummary: session.cacheSummary || null,
     qualityCheck: session.qualityCheck || null,
     revisionSummary: session.revisionSummary || null,
+    designIntent: session.designIntent || null,
     narrativePlan: session.narrativePlan || null,
     templateDiagnostics: session.templateDiagnostics || null,
     visualContext: session.aiProviderId === 'openai'

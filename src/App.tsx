@@ -204,8 +204,10 @@ type PptStructuredMaster = {
 type PptSlidePlan = {
   title: string
   subtitle: string
+  pageType?: string
   layout: string
   emphasis: string
+  insight?: string
   bullets: string[]
   footer: string
   speakerNotes: string
@@ -228,20 +230,42 @@ type PptNarrativePlan = {
   subtitle: string
   audience: string
   coreMessage: string
+  designStrategy?: string
+  userStructureHandling?: string
   storyline: string[]
   assumptions: string[]
   slides: Array<{
     slideNumber: number
     role: string
+    pageType?: string
     layoutIntent: string
     keyMessage: string
+    slideClaim?: string
     contentPriority: 'high' | 'medium' | 'low'
     suggestedTemplateRole: string
     visualDirection: string
+    informationBlocks?: string[]
     mustSay: string[]
     supportingPoints: string[]
     avoid: string[]
+    sourceBasis?: string
   }>
+}
+
+type PptDesignIntent = {
+  layoutSkeletonFixed?: boolean
+  structureSource: 'explicit_user' | 'implicit_material' | 'ai_decide' | string
+  planningMode: 'execute_user_structure' | 'follow_material_outline' | 'director_mode' | string
+  aiMayReorganize: boolean
+  lockedOutline: string[]
+  pageTypeHints: Array<{
+    slideNumber?: number
+    pageType: string
+    hint: string
+    source: string
+  }>
+  explicitConstraints: string[]
+  evidence: string[]
 }
 
 type PptTemplateDiagnostics = {
@@ -342,6 +366,7 @@ type PptSessionResponse = {
     commentCount: number
     updatedAt: string
   } | null
+  designIntent?: PptDesignIntent | null
   narrativePlan?: PptNarrativePlan | null
   templateDiagnostics?: PptTemplateDiagnostics | null
   master: {
@@ -2804,7 +2829,22 @@ function PptEnhancementStrip({ session }: { session: PptSessionResponse }) {
   const check = diagnostics?.checkSummary || session.output?.templateFill?.checkSummary
   const match = diagnostics?.templateSlideMatch || diagnostics?.finalTemplateSlideMatch
   const matchSlideCount = diagnostics?.finalTemplateSlideMatch?.slideCount || match?.slideCount || 0
+  const designIntent = session.designIntent
+  const designDetail = designIntent
+    ? designIntent.planningMode === 'execute_user_structure'
+      ? '执行用户结构'
+      : designIntent.planningMode === 'follow_material_outline'
+        ? '沿用材料大纲'
+        : designIntent.layoutSkeletonFixed
+          ? 'AI 规划 · 固定骨架'
+          : 'AI 导演规划'
+    : '未启用'
   const items = [
+    {
+      label: '设计导演',
+      detail: designDetail,
+      active: Boolean(designIntent),
+    },
     {
       label: '叙事大纲',
       detail: session.narrativePlan ? `${session.narrativePlan.slides.length} 页策略` : '未启用',
@@ -2848,7 +2888,7 @@ function PptEnhancementStrip({ session }: { session: PptSessionResponse }) {
     <div className="ppt-enhancement-strip" aria-label="PPT 第二阶段增强状态">
       <div>
         <span className="eyebrow">第二阶段增强</span>
-        <strong>{session.narrativePlan?.coreMessage || '已启用更强模板理解与内容规划'}</strong>
+        <strong>{session.narrativePlan?.coreMessage || session.narrativePlan?.designStrategy || '已启用更强 PPT 逻辑与页面设计'}</strong>
       </div>
       <div className="ppt-enhancement-items">
         {items.map((item) => (
