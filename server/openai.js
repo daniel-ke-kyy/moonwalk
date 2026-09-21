@@ -5,21 +5,7 @@ import {
   normalizeSummary,
   parseJsonResponse,
 } from './deepseek.js'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import path from 'node:path'
-import {
-  buildPptNarrativePlanPrompt,
-  buildPptPartialRevisionPrompt,
-  buildPptPlanPrompt,
-  buildPptQualityCheckPrompt,
-  buildPptRevisionPrompt,
-  buildPptTemplateFillPrompt,
-  mergePartialPptPlan,
-  normalizePptNarrativePlan,
-  normalizePptPlan,
-  normalizePptQualityCheck,
-} from './pptPlan.js'
-import { normalizeTemplateFillPlan } from './pptTemplateFill.js'
+import { readFile } from 'node:fs/promises'
 
 const OPENAI_API_URL = normalizeOpenAiApiUrl()
 const modelName = process.env.OPENAI_MODEL || 'gpt-5.6-sol'
@@ -277,135 +263,7 @@ JSON 格式：
   return normalizeOpenFeedback(parseJsonResponse(payload, 'GPT-5.6 Sol'), answerItems)
 }
 
-export async function generatePptPlan(context) {
-  const payload = await callOpenAi({
-    temperature: 0.38,
-    maxTokens: Math.max(4096, context.slideCount * 850),
-    instructions:
-      '你是中文 PPT 内容策划助手。你只负责生成页面计划 JSON，不生成图片，不输出 Markdown。必须只输出有效 JSON。',
-    input: buildPptPlanPrompt(context),
-    visualContext: context.visualContext,
-  })
-
-  return normalizePptPlan(parseJsonResponse(payload, 'GPT-5.6 Sol'), context.slideCount, context.fallbackTitle)
-}
-
-export async function generatePptNarrativePlan(context) {
-  const payload = await callOpenAi({
-    temperature: 0.32,
-    maxTokens: Math.max(4096, context.slideCount * 650),
-    instructions:
-      '你是中文 PPT 内容架构师。你只负责先生成内容叙事大纲和页面策略 JSON，不选择模板页，不输出 Markdown。必须只输出有效 JSON。',
-    input: buildPptNarrativePlanPrompt(context),
-    visualContext: context.visualContext,
-  })
-
-  return normalizePptNarrativePlan(parseJsonResponse(payload, 'GPT-5.6 Sol'), context.slideCount, context.fallbackTitle)
-}
-
-export async function generatePptTemplateFillPlan(context) {
-  const payload = await callOpenAi({
-    temperature: 0.28,
-    maxTokens: Math.max(4096, context.slideCount * 1200),
-    instructions:
-      '你是中文 PPT 模板填充策划助手。你只负责根据模板页面库生成 fill_plan JSON，不生成图片，不输出 Markdown。必须只输出有效 JSON。',
-    input: buildPptTemplateFillPrompt(context),
-    visualContext: context.visualContext,
-  })
-
-  return normalizeTemplateFillPlan(parseJsonResponse(payload, 'GPT-5.6 Sol'), context.templateFillLibraryRaw, context.slideCount)
-}
-
-export async function revisePptPlan(context) {
-  const payload = await callOpenAi({
-    temperature: 0.34,
-    maxTokens: Math.max(4096, context.slideCount * 850),
-    instructions:
-      '你是中文 PPT 修改助手。你只根据修改意见调整页面计划 JSON，不生成图片，不输出 Markdown。必须只输出有效 JSON。',
-    input: buildPptRevisionPrompt(context),
-    visualContext: context.visualContext,
-  })
-
-  return normalizePptPlan(parseJsonResponse(payload, 'GPT-5.6 Sol'), context.slideCount, context.fallbackTitle)
-}
-
-export async function revisePptPlanPartial(context) {
-  const payload = await callOpenAi({
-    temperature: 0.3,
-    maxTokens: Math.max(4096, context.slideComments.length * 1200),
-    instructions:
-      '你是中文 PPT 局部修改助手。你只能返回用户要求修改的页面 JSON，不生成整套 PPT，不输出 Markdown。必须只输出有效 JSON。',
-    input: buildPptPartialRevisionPrompt(context),
-    visualContext: context.visualContext,
-  })
-
-  return mergePartialPptPlan(
-    context.currentPlan,
-    parseJsonResponse(payload, 'GPT-5.6 Sol'),
-    context.slideComments,
-    context.slideCount,
-    context.fallbackTitle,
-  )
-}
-
-export async function checkPptQuality(context) {
-  const payload = await callOpenAi({
-    temperature: 0.2,
-    maxTokens: 4096,
-    instructions:
-      '你是中文 PPT 质量审稿人。你要直接、具体、严格，只输出质量自检 JSON，不输出 Markdown。',
-    input: buildPptQualityCheckPrompt(context),
-    visualContext: context.visualContext,
-  })
-
-  return normalizePptQualityCheck(parseJsonResponse(payload, 'GPT-5.6 Sol'), context.plan)
-}
-
-export async function generatePptImage({ prompt, outputPath }) {
-  if (!hasAiKey()) {
-    throw new Error('还没有配置 OPENAI_API_KEY。请先配置 OpenAI API Key。')
-  }
-  const safePrompt = String(prompt || '').trim()
-  if (!safePrompt) throw new Error('缺少图片生成提示词。')
-
-  const body = {
-    model: modelName,
-    input: [
-      '请为中文 PPT 生成一张可直接放入幻灯片的图片。',
-      '要求：无水印、无边框、不要生成可读文字或复杂中文字，画面干净，适合作为 16:9 演示文稿中的插图。',
-      `图片需求：${safePrompt}`,
-    ].join('\n'),
-    tools: [
-      {
-        type: 'image_generation',
-        size: '1024x1024',
-        action: 'generate',
-      },
-    ],
-    tool_choice: { type: 'image_generation' },
-  }
-  const json = await sendOpenAiRequest(body).catch((error) => {
-    if (!isImageGenerationToolOptionsFallbackError(error)) throw error
-    return sendOpenAiRequest({
-      ...body,
-      tools: [{ type: 'image_generation' }],
-      tool_choice: undefined,
-    })
-  })
-
-  const imageData = extractImageGenerationResult(json)
-  if (!imageData) {
-    throw new Error('GPT-5.6 Sol 图片生成没有返回可用图片。')
-  }
-  await mkdir(path.dirname(outputPath), { recursive: true })
-  await writeImageResult(outputPath, imageData)
-  return {
-    outputPath,
-    model: modelName,
-  }
-}
-
-async function callOpenAi({ instructions, input, temperature, maxTokens, visualContext = null, tools = null }) {
+async function callOpenAi({ instructions, input, temperature, maxTokens, visualContext = null }) {
   if (!hasAiKey()) {
     throw new Error('还没有配置 OPENAI_API_KEY。请先配置 OpenAI API Key，或切换到 DeepSeek 重试。')
   }
@@ -426,7 +284,6 @@ async function callOpenAi({ instructions, input, temperature, maxTokens, visualC
         type: 'json_object',
       },
     },
-    ...(Array.isArray(tools) && tools.length ? { tools } : {}),
   }
   const json = await sendOpenAiRequest(body).catch(async (error) => {
     if (!usedVisualInput || !isVisualInputFallbackError(error)) throw error
@@ -481,45 +338,6 @@ function extractResponseText(json) {
   return chunks.join('\n').trim()
 }
 
-function extractImageGenerationResult(json) {
-  const output = Array.isArray(json?.output) ? json.output : []
-  for (const item of output) {
-    if (item?.type === 'image_generation_call') {
-      const result = item.result || item.image || item.data
-      if (typeof result === 'string' && result.trim()) return normalizeImageData(result)
-    }
-    const content = Array.isArray(item?.content) ? item.content : []
-    for (const part of content) {
-      const result = part?.result || part?.image || part?.data || part?.image_url
-      if (typeof result === 'string' && result.trim()) return normalizeImageData(result)
-    }
-  }
-  const direct = json?.result || json?.image || json?.url || json?.data?.[0]?.b64_json || json?.data?.[0]?.url
-  return typeof direct === 'string' && direct.trim() ? normalizeImageData(direct) : ''
-}
-
-function normalizeImageData(value) {
-  const text = String(value || '').trim()
-  if (!text.startsWith('data:')) return text
-  return text.split(',').at(-1) || ''
-}
-
-async function writeImageResult(outputPath, imageData) {
-  const data = String(imageData || '').trim()
-  if (/^https?:\/\//i.test(data)) {
-    const response = await fetch(data)
-    if (!response.ok) {
-      throw new Error(`图片下载失败：HTTP ${response.status}`)
-    }
-    await writeFile(outputPath, Buffer.from(await response.arrayBuffer()))
-    return
-  }
-  if (!/^[A-Za-z0-9+/=\s_-]+$/.test(data) || data.length < 80) {
-    throw new Error('GPT-5.6 Sol 图片生成返回了无法识别的图片数据。')
-  }
-  await writeFile(outputPath, data.replace(/\s+/g, ''), 'base64')
-}
-
 async function buildOpenAiInput(text, visualContext) {
   const pages = (visualContext?.pages || []).slice(0, maxVisualPages)
   if (!pages.length) return text
@@ -567,12 +385,6 @@ function isVisualInputFallbackError(error) {
   const message = String(error?.rawMessage || error?.message || '')
   return Boolean(error?.status === 400 || error?.status === 415 || error?.status === 422 || error?.status === 503)
     || /input_image|image|vision|multimodal|供应商暂时不可用|暂时不可用|unsupported/i.test(message)
-}
-
-function isImageGenerationToolOptionsFallbackError(error) {
-  const message = String(error?.rawMessage || error?.message || '')
-  return Boolean(error?.status === 400 || error?.status === 422)
-    && /tool_choice|action|size|unknown parameter|unsupported|invalid/i.test(message)
 }
 
 function appendVisualFallbackNote(text, visualContext, reason) {

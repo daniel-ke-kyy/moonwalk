@@ -30,7 +30,6 @@
     "nanoid": "^5.1.11",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
-    "pptxgenjs": "^4.0.1",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "react-router-dom": "^7.16.0",

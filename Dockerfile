@@ -9,12 +9,8 @@ RUN apt-get update \
     libreoffice-impress \
     fonts-noto-cjk \
     fonts-noto-color-emoji \
-    python3 \
-    python3-pip \
     poppler-utils \
   && rm -rf /var/lib/apt/lists/*
-
-RUN python3 -m pip install --break-system-packages --no-cache-dir python-pptx
 
 COPY package*.json ./
 RUN npm ci --include=dev
