@@ -6,13 +6,13 @@ export const DEFAULT_AI_PROVIDER = 'deepseek'
 const providers = {
   deepseek: {
     id: 'deepseek',
-    label: 'DeepSeek',
+    label: 'DeepSeek-V4.1-Flash',
     keyName: 'DEEPSEEK_API_KEY',
     module: deepseek,
   },
   openai: {
     id: 'openai',
-    label: 'GPT-5.5',
+    label: 'GPT-5.6 Sol',
     keyName: 'OPENAI_API_KEY',
     module: openai,
   },

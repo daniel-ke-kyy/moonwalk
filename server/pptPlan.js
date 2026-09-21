@@ -176,7 +176,7 @@ function buildPptImageGenerationRuleBlock(context) {
   }
   return `
 图片能力：
-- 当前选择 GPT-5.5，服务端会根据 extra_shapes 里的 image_placeholder.image_prompt 生成真实配图并嵌入 PPTX。
+- 当前选择 GPT-5.6 Sol，服务端会根据 extra_shapes 里的 image_placeholder.image_prompt 生成真实配图并嵌入 PPTX。
 - 整套 PPT 最多允许 ${limit} 张真实图片；最多输出 ${limit} 个有效 image_placeholder，超过的会被忽略。
 - 你不能在 JSON 里输出图片数据、URL 或 Markdown 图片，只能写清楚 image_prompt。
 - 只在内容页使用 image_placeholder；封面、目录、章节标题页、结尾页不要新增图片占位。
@@ -432,7 +432,7 @@ ${JSON.stringify(context.templates, null, 2)}
 输出要求：
 1. 统一使用中文。
 2. 必须刚好生成 ${context.slideCount} 页。
-3. 这个页面计划阶段不要要求生成真实新图片；如选择 GPT-5.5，真实配图只由后续模板填充阶段通过 image_placeholder.image_prompt 触发。
+3. 这个页面计划阶段不要要求生成真实新图片；如选择 GPT-5.6 Sol，真实配图只由后续模板填充阶段通过 image_placeholder.image_prompt 触发。
 4. 每页 bullets 建议 2-5 条，每条尽量短，适合放在 PPT 上。
 5. speakerNotes 可写给演讲者看的补充说明，不要太长。
 6. layout 只能从 cover、agenda、section、content、two_column、comparison、timeline、quote、summary 中选择。

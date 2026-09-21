@@ -15,7 +15,7 @@
 - 单个文件不超过 50MB。
 - PDF 不超过 100 页，PPTX 不超过 100 页幻灯片。
 - 使用 DeepSeek API 作为 AI 服务。
-- 默认模型为低成本模型 `deepseek-v4-flash`。
+- 默认模型为低成本模型 `deepseek-flash`。
 - 上传后展示系统识别到的主题、知识点和章节/模块。
 - 用户可勾选或取消勾选知识点。
 - 用户可设置题目数量、难度、是否只考重点内容、是否按照章节生成。
@@ -100,8 +100,8 @@ type Question = {
 ## 5. 限制与风险
 
 - DeepSeek 官方 API 是按 token 计费，并从充值余额或赠送余额扣除；它不是稳定意义上的永久免费服务。
-- 本项目默认使用 `deepseek-v4-flash` 并加入低成本模型保护，避免误切到更贵模型。
-- DeepSeek API 当前是文本 Chat Completion，不能直接理解上传文件里的图片、图表、流程图或扫描版文字。
+- 本项目默认使用 `deepseek-flash` 并加入低成本模型保护，避免误切到更贵模型。
+- 本项目的 DeepSeek 路径当前只发送提取后的文字；升级模型不会自动启用图片、图表或扫描页理解。
 - PDF 如果是扫描版或图片型材料，可能无法提取足够文字。
 - AI 题目存在幻觉风险，需要通过 JSON 输出、强提示和前端校验降低格式错误，但不能完全消除内容错误。
 
@@ -109,7 +109,7 @@ type Question = {
 
 ```bash
 DEEPSEEK_API_KEY=你的 DeepSeek API Key
-DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_MODEL=deepseek-flash
 DEEPSEEK_API_URL=https://api.deepseek.com/chat/completions
 PORT=5174
 ```

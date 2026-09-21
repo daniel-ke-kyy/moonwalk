@@ -14,15 +14,15 @@ import {
 import { normalizeTemplateFillPlan } from './pptTemplateFill.js'
 
 const DEEPSEEK_API_URL = process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/chat/completions'
-const modelName = process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash'
-const LOW_COST_MODELS = new Set(['deepseek-v4-flash', 'deepseek-chat'])
+const modelName = process.env.DEEPSEEK_MODEL || 'deepseek-flash'
+const LOW_COST_MODELS = new Set(['deepseek-flash', 'deepseek-v4-flash', 'deepseek-chat'])
 
 export function hasAiKey() {
   return Boolean(process.env.DEEPSEEK_API_KEY)
 }
 
 export function getAiProviderName() {
-  return 'DeepSeek'
+  return 'DeepSeek-V4.1-Flash'
 }
 
 export function getAiModelName() {
@@ -423,7 +423,7 @@ async function callDeepSeek({ messages, temperature, maxTokens }) {
     throw new Error('还没有配置 DEEPSEEK_API_KEY。请在 .env 中填入 DeepSeek API Key。')
   }
   if (!isLowCostModelSelected()) {
-    throw new Error(`当前模型 ${modelName} 不在低成本保护列表中。请将 DEEPSEEK_MODEL 设置为 deepseek-v4-flash。`)
+    throw new Error(`当前模型 ${modelName} 不在低成本保护列表中。请将 DEEPSEEK_MODEL 设置为 deepseek-flash。`)
   }
 
   const response = await fetch(DEEPSEEK_API_URL, {

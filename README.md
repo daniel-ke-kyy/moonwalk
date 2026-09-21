@@ -8,8 +8,8 @@
 
 本项目支持两种 AI：
 
-- `DeepSeek`：默认模型，使用 `deepseek-v4-flash`，并在后端加入低成本模型保护。
-- `GPT-5.5`：可选高质量模型，使用 OpenAI Responses API。它不是免费模型，需要可用的 OpenAI API Key 和 API 额度。
+- `DeepSeek-V4.1-Flash`：默认模型，使用 `deepseek-flash`，保留非思考模式，并在后端加入低成本模型保护。
+- `GPT-5.6 Sol`：使用 `gpt-5.6-sol` 和中等思考强度 `medium`，通过 OpenAI Responses API 调用。它不是免费模型，需要可用的 API Key 和 API 额度；自定义代理还需支持该模型。
 
 DeepSeek 官方 API 是按 token 计费，并从充值余额或赠送余额扣除；它不是稳定意义上的永久免费服务。如果你的 DeepSeek 账号有赠送余额，调用会优先消耗赠送余额。
 
@@ -27,14 +27,14 @@ cp .env.example .env
 
 ```bash
 DEEPSEEK_API_KEY=你的 DeepSeek API Key
-DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_MODEL=deepseek-flash
 OPENAI_API_KEY=你的 OpenAI API Key
-OPENAI_MODEL=gpt-5.5
-OPENAI_REASONING_EFFORT=low
+OPENAI_MODEL=gpt-5.6-sol
+OPENAI_REASONING_EFFORT=medium
 PORT=5174
 ```
 
-如果暂时不使用 GPT-5.5，可以不填 `OPENAI_API_KEY`；首页会显示 GPT-5.5 未配置。
+如果暂时不使用 GPT-5.6 Sol，可以不填 `OPENAI_API_KEY`；首页会显示 GPT-5.6 Sol 未配置。
 
 如果需要启用全站访问密码，可以配置：
 
@@ -89,10 +89,10 @@ cloudflared tunnel --url http://localhost:5174
 - Health Check Path: `/api/health`
 - Environment:
   - `DEEPSEEK_API_KEY`: 你的 DeepSeek API Key
-  - `DEEPSEEK_MODEL`: `deepseek-v4-flash`
+  - `DEEPSEEK_MODEL`: `deepseek-flash`
   - `OPENAI_API_KEY`: 你的 OpenAI API Key
-  - `OPENAI_MODEL`: `gpt-5.5`
-  - `OPENAI_REASONING_EFFORT`: `low`
+  - `OPENAI_MODEL`: `gpt-5.6-sol`
+  - `OPENAI_REASONING_EFFORT`: `medium`
   - `ACCESS_PASSWORD`: 共享访问密码
   - `NODE_ENV`: `production`
 

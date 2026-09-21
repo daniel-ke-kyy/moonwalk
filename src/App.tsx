@@ -433,16 +433,16 @@ const defaultAiProvider: AiProviderId = 'deepseek'
 const fallbackAiProviders: AiProviderStatus[] = [
   {
     id: 'deepseek',
-    label: 'DeepSeek',
+    label: 'DeepSeek-V4.1-Flash',
     configured: false,
-    model: 'deepseek-v4-flash',
+    model: 'deepseek-flash',
     lowCostModelSelected: true,
   },
   {
     id: 'openai',
-    label: 'GPT-5.5',
+    label: 'GPT-5.6 Sol',
     configured: false,
-    model: 'gpt-5.5',
+    model: 'gpt-5.6-sol',
     lowCostModelSelected: true,
   },
 ]
@@ -2328,7 +2328,7 @@ function PptSetupView({
         <div>
           <span className="eyebrow">基于模板的 PPT 生成</span>
           <h1>上传模板，设定内容与生成方向</h1>
-          <p>当前流程已锁定使用 {lockedAiProvider === 'openai' ? 'GPT-5.5' : 'DeepSeek'}。先分析模板，再选择主模板生成初稿。</p>
+          <p>当前流程已锁定使用 {lockedAiProvider === 'openai' ? 'GPT-5.6 Sol' : 'DeepSeek'}。先分析模板，再选择主模板生成初稿。</p>
         </div>
       </div>
 
@@ -3065,7 +3065,7 @@ function getAiProviderStatus(health: Health | null, providerId: AiProviderId) {
 }
 
 function getAiProviderLabel(health: Health | null, providerId: AiProviderId) {
-  return getAiProviderStatus(health, providerId)?.label || (providerId === 'openai' ? 'GPT-5.5' : 'DeepSeek')
+  return getAiProviderStatus(health, providerId)?.label || (providerId === 'openai' ? 'GPT-5.6 Sol' : 'DeepSeek')
 }
 
 function withFeedbackQuestionSet(questionSet: OpenQuestionSet, writingGoal: string): OpenQuestionSet {

@@ -22,8 +22,8 @@ import {
 import { normalizeTemplateFillPlan } from './pptTemplateFill.js'
 
 const OPENAI_API_URL = normalizeOpenAiApiUrl()
-const modelName = process.env.OPENAI_MODEL || 'gpt-5.5'
-const reasoningEffort = process.env.OPENAI_REASONING_EFFORT || 'low'
+const modelName = process.env.OPENAI_MODEL || 'gpt-5.6-sol'
+const reasoningEffort = process.env.OPENAI_REASONING_EFFORT || 'medium'
 const maxVisualPages = Number(process.env.OPENAI_MAX_VISUAL_PAGES || 8)
 
 export function hasAiKey() {
@@ -31,7 +31,7 @@ export function hasAiKey() {
 }
 
 export function getAiProviderName() {
-  return 'GPT-5.5'
+  return 'GPT-5.6 Sol'
 }
 
 export function getAiModelName() {
@@ -80,7 +80,7 @@ JSON 要求：
     visualContext: prepared.visualContext,
   })
 
-  return normalizeSummary(parseJsonResponse(payload, 'GPT-5.5'))
+  return normalizeSummary(parseJsonResponse(payload, 'GPT-5.6 Sol'))
 }
 
 export async function generateQuiz(session, settings) {
@@ -144,7 +144,7 @@ JSON 格式：
     visualContext: session.prepared.visualContext,
   })
 
-  return normalizeQuiz(parseJsonResponse(payload, 'GPT-5.5'), settings.questionCount, 'GPT-5.5')
+  return normalizeQuiz(parseJsonResponse(payload, 'GPT-5.6 Sol'), settings.questionCount, 'GPT-5.6 Sol')
 }
 
 export async function generateOpenQuestions(session, settings) {
@@ -205,7 +205,7 @@ JSON 格式：
     visualContext: session.prepared.visualContext,
   })
 
-  return normalizeOpenQuestions(parseJsonResponse(payload, 'GPT-5.5'), settings.questionCount, 'GPT-5.5')
+  return normalizeOpenQuestions(parseJsonResponse(payload, 'GPT-5.6 Sol'), settings.questionCount, 'GPT-5.6 Sol')
 }
 
 export async function generateOpenFeedback(session, settings) {
@@ -274,7 +274,7 @@ JSON 格式：
     visualContext: prepared.visualContext,
   })
 
-  return normalizeOpenFeedback(parseJsonResponse(payload, 'GPT-5.5'), answerItems)
+  return normalizeOpenFeedback(parseJsonResponse(payload, 'GPT-5.6 Sol'), answerItems)
 }
 
 export async function generatePptPlan(context) {
@@ -287,7 +287,7 @@ export async function generatePptPlan(context) {
     visualContext: context.visualContext,
   })
 
-  return normalizePptPlan(parseJsonResponse(payload, 'GPT-5.5'), context.slideCount, context.fallbackTitle)
+  return normalizePptPlan(parseJsonResponse(payload, 'GPT-5.6 Sol'), context.slideCount, context.fallbackTitle)
 }
 
 export async function generatePptNarrativePlan(context) {
@@ -300,7 +300,7 @@ export async function generatePptNarrativePlan(context) {
     visualContext: context.visualContext,
   })
 
-  return normalizePptNarrativePlan(parseJsonResponse(payload, 'GPT-5.5'), context.slideCount, context.fallbackTitle)
+  return normalizePptNarrativePlan(parseJsonResponse(payload, 'GPT-5.6 Sol'), context.slideCount, context.fallbackTitle)
 }
 
 export async function generatePptTemplateFillPlan(context) {
@@ -313,7 +313,7 @@ export async function generatePptTemplateFillPlan(context) {
     visualContext: context.visualContext,
   })
 
-  return normalizeTemplateFillPlan(parseJsonResponse(payload, 'GPT-5.5'), context.templateFillLibraryRaw, context.slideCount)
+  return normalizeTemplateFillPlan(parseJsonResponse(payload, 'GPT-5.6 Sol'), context.templateFillLibraryRaw, context.slideCount)
 }
 
 export async function revisePptPlan(context) {
@@ -326,7 +326,7 @@ export async function revisePptPlan(context) {
     visualContext: context.visualContext,
   })
 
-  return normalizePptPlan(parseJsonResponse(payload, 'GPT-5.5'), context.slideCount, context.fallbackTitle)
+  return normalizePptPlan(parseJsonResponse(payload, 'GPT-5.6 Sol'), context.slideCount, context.fallbackTitle)
 }
 
 export async function revisePptPlanPartial(context) {
@@ -341,7 +341,7 @@ export async function revisePptPlanPartial(context) {
 
   return mergePartialPptPlan(
     context.currentPlan,
-    parseJsonResponse(payload, 'GPT-5.5'),
+    parseJsonResponse(payload, 'GPT-5.6 Sol'),
     context.slideComments,
     context.slideCount,
     context.fallbackTitle,
@@ -358,7 +358,7 @@ export async function checkPptQuality(context) {
     visualContext: context.visualContext,
   })
 
-  return normalizePptQualityCheck(parseJsonResponse(payload, 'GPT-5.5'), context.plan)
+  return normalizePptQualityCheck(parseJsonResponse(payload, 'GPT-5.6 Sol'), context.plan)
 }
 
 export async function generatePptImage({ prompt, outputPath }) {
@@ -395,7 +395,7 @@ export async function generatePptImage({ prompt, outputPath }) {
 
   const imageData = extractImageGenerationResult(json)
   if (!imageData) {
-    throw new Error('GPT-5.5 图片生成没有返回可用图片。')
+    throw new Error('GPT-5.6 Sol 图片生成没有返回可用图片。')
   }
   await mkdir(path.dirname(outputPath), { recursive: true })
   await writeImageResult(outputPath, imageData)
@@ -430,7 +430,7 @@ async function callOpenAi({ instructions, input, temperature, maxTokens, visualC
   }
   const json = await sendOpenAiRequest(body).catch(async (error) => {
     if (!usedVisualInput || !isVisualInputFallbackError(error)) throw error
-    console.warn(`GPT-5.5 视觉输入暂不可用，已自动退回文本理解：${error.message}`)
+    console.warn(`GPT-5.6 Sol 视觉输入暂不可用，已自动退回文本理解：${error.message}`)
     return sendOpenAiRequest({
       ...body,
       input: appendVisualFallbackNote(input, visualContext, error.message),
@@ -439,7 +439,7 @@ async function callOpenAi({ instructions, input, temperature, maxTokens, visualC
 
   const content = extractResponseText(json)
   if (!content) {
-    throw new Error('GPT-5.5 没有返回内容。你可以切换到 DeepSeek 重试。')
+    throw new Error('GPT-5.6 Sol 没有返回内容。你可以切换到 DeepSeek 重试。')
   }
   return content
 }
@@ -457,7 +457,7 @@ async function sendOpenAiRequest(body) {
   const json = await response.json().catch(() => null)
   if (!response.ok) {
     const rawMessage = json?.error?.message || json?.message || 'OpenAI API 调用失败。'
-    const error = new Error(`GPT-5.5 调用失败：${rawMessage}。你可以切换到 DeepSeek 重试。`)
+    const error = new Error(`GPT-5.6 Sol 调用失败：${rawMessage}。你可以切换到 DeepSeek 重试。`)
     error.status = response.status
     error.rawMessage = rawMessage
     throw error
@@ -515,7 +515,7 @@ async function writeImageResult(outputPath, imageData) {
     return
   }
   if (!/^[A-Za-z0-9+/=\s_-]+$/.test(data) || data.length < 80) {
-    throw new Error('GPT-5.5 图片生成返回了无法识别的图片数据。')
+    throw new Error('GPT-5.6 Sol 图片生成返回了无法识别的图片数据。')
   }
   await writeFile(outputPath, data.replace(/\s+/g, ''), 'base64')
 }
