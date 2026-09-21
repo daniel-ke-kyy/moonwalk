@@ -6,7 +6,6 @@ import {
   Check,
   CheckCircle2,
   ChevronRight,
-  FileText,
   Loader2,
   RefreshCcw,
   Sparkles,
@@ -652,7 +651,7 @@ function TopBar({
   ]
 
   return (
-    <header className="top-bar">
+    <header className={`top-bar ${currentStep === 'upload' ? 'home-top-bar' : ''}`}>
         <div className="brand">
           <span className="brand-mark">
             <Sparkles size={18} />
@@ -709,10 +708,6 @@ function UploadView({
   return (
     <section className="upload-layout">
       <div className="intro">
-        <div className="eyebrow">
-          <FileText size={16} />
-          PDF / DOCX / PPTX
-        </div>
         <h1 className="hero-title">Moonwalk</h1>
       </div>
 
@@ -737,7 +732,7 @@ function UploadView({
             onChange={onFileChange}
             hidden
           />
-          <div className="upload-icon">
+          <div className="upload-icon" aria-hidden="true">
             {isUploading ? <Loader2 className="spin" size={34} /> : <UploadCloud size={36} />}
           </div>
           <h2>{isUploading ? '正在识别材料' : '上传学习材料'}</h2>
@@ -751,6 +746,7 @@ function UploadView({
             {!isUploading && <ChevronRight size={18} />}
           </button>
           <div className="limit-grid">
+            <span>PDF / DOCX / PPTX</span>
             <span>单文件不超过 {health?.limits.maxFileSizeMB || 50}MB</span>
             <span>PDF 不超过 {health?.limits.maxPdfPages || 100} 页</span>
             <span>PPTX 不超过 {health?.limits.maxPptxSlides || 100} 页</span>
@@ -793,7 +789,6 @@ function AiProviderSelector({
     <section className="provider-selector" aria-label="AI 模型选择">
       <div>
         <span className="provider-label">AI 模型</span>
-        <p>进入流程后会锁定当前选择，整套识别、出题和反馈都使用同一个模型。</p>
       </div>
       <div className="provider-options">
         {providers.map((provider) => (
@@ -801,12 +796,12 @@ function AiProviderSelector({
             type="button"
             className={selectedAiProvider === provider.id ? 'active' : ''}
             disabled={disabled}
+            aria-pressed={selectedAiProvider === provider.id}
             key={provider.id}
             onClick={() => setSelectedAiProvider(provider.id)}
           >
             <strong>{provider.label}</strong>
-            <span>{provider.model}</span>
-            <small>{provider.configured ? '已配置' : '未配置'}</small>
+            <small>{provider.configured ? (selectedAiProvider === provider.id ? '已选择' : '可用') : '未配置'}</small>
           </button>
         ))}
       </div>
@@ -823,7 +818,7 @@ function StatusStrip({ health, selectedAiProvider }: { health: Health | null; se
       ? `尚未检测到 ${selectedAiProvider === 'openai' ? 'OPENAI_API_KEY' : 'DEEPSEEK_API_KEY'}。请配置后再使用 ${provider?.label || getAiProviderLabel(health, selectedAiProvider)}。`
       : !provider.lowCostModelSelected
         ? `当前模型 ${provider.model} 不在保护列表中，请检查环境变量。`
-        : `${provider.label} 已配置，当前模型：${provider.model}。`
+        : '服务已就绪'
   return (
     <div className={`status-strip ${configured ? 'ready' : 'warning'}`}>
       {configured ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
