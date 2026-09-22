@@ -11,9 +11,9 @@ colors:
   teal: "#4e7d77"
 typography:
   display:
-    fontFamily: "Moonwalk Display, serif"
+    fontFamily: "Snell Roundhand, Brush Script MT, Segoe Script, cursive"
     fontSize: "124px"
-    fontWeight: 400
+    fontWeight: 700
     lineHeight: 1.08
     letterSpacing: "0"
   body:
@@ -45,7 +45,7 @@ Scope: the upload homepage only. The assessment and authentication screens retai
 Warm-neutral paper and charcoal carry the interface. Yellow, coral and teal distinguish illustrative document content. Do not apply a monochromatic green wash to the page.
 
 ## Typography
-Italiana is self-hosted as Moonwalk Display. DM Sans is self-hosted for Latin text; Chinese uses the platform Chinese sans-serif. Display sizes are fixed at responsive breakpoints: 144, 124, 100, 76 and 64 px. The large display face belongs only to the brand heading, never to controls.
+Both homepage Moonwalk titles use the original Snell Roundhand / Brush Script MT / Segoe Script cursive stack at weight 700, restored at the user's request. Italiana remains self-hosted as Moonwalk Display for workflow step numbers. DM Sans is self-hosted for Latin body text; Chinese uses the platform Chinese sans-serif. Display sizes are fixed at responsive breakpoints: 144, 124, 100, 76 and 64 px. The large display face belongs only to the brand heading, never to controls.
 
 ## Layout
 A full-width Three.js scene surrounds the centered upload action. The functional interface is semantic HTML above the canvas. Desktop uses five sheets; widths below 760 px use three smaller sheets above the upload action. The scene toolbar is centered in a reserved 128 px area below the core controls, preventing overlap with paper content and errors. The four-step workflow sits below it.
