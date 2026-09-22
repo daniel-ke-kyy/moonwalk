@@ -13,6 +13,8 @@ import {
   XCircle,
 } from 'lucide-react'
 import './App.css'
+import './Home.css'
+import { PaperScene } from './PaperScene'
 
 type Importance = 'high' | 'medium' | 'low'
 type Difficulty = '简单' | '中等' | '困难'
@@ -478,7 +480,7 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${step === 'upload' ? 'mw-home-shell' : ''}`}>
       <TopBar currentStep={step} showLogout={authStatus.required} onLogout={handleLogout} />
 
       {step === 'upload' && (
@@ -650,8 +652,20 @@ function TopBar({
     ['result', '查看解析'],
   ]
 
+  if (currentStep === 'upload') {
+    return (
+      <header className="mw-header">
+        <span className="mw-wordmark">Moonwalk</span>
+        <div className="mw-header-right">
+          <span className="mw-header-location">学习工作台</span>
+          {showLogout && <button type="button" onClick={onLogout}>退出访问 <ArrowRight size={14} /></button>}
+        </div>
+      </header>
+    )
+  }
+
   return (
-    <header className={`top-bar ${currentStep === 'upload' ? 'home-top-bar' : ''}`}>
+    <header className="top-bar">
         <div className="brand">
           <span className="brand-mark">
             <Sparkles size={18} />
@@ -698,6 +712,7 @@ function UploadView({
   onUpload: (file: File | null) => void
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const dragDepth = useRef(0)
   const [dragActive, setDragActive] = useState(false)
 
   function onFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -706,25 +721,35 @@ function UploadView({
   }
 
   return (
-    <section className="upload-layout">
-      <div className="intro">
-        <h1 className="hero-title">Moonwalk</h1>
-      </div>
-
-      <div className="feature-panels">
-        <div
-          className={`upload-panel ${dragActive ? 'dragging' : ''}`}
-          onDragOver={(event) => {
-            event.preventDefault()
-            setDragActive(true)
-          }}
-          onDragLeave={() => setDragActive(false)}
-          onDrop={(event) => {
-            event.preventDefault()
-            setDragActive(false)
-            onUpload(event.dataTransfer.files?.[0] || null)
-          }}
-        >
+    <section className={`mw-home ${dragActive ? 'is-dragging' : ''} ${isUploading ? 'is-uploading' : ''}`}
+      onDragEnter={(event) => {
+        event.preventDefault()
+        if (!event.dataTransfer.types.includes('Files') || isUploading) return
+        dragDepth.current += 1
+        setDragActive(true)
+      }}
+      onDragOver={(event) => {
+        event.preventDefault()
+        event.dataTransfer.dropEffect = isUploading ? 'none' : 'copy'
+      }}
+      onDragLeave={(event) => {
+        event.preventDefault()
+        dragDepth.current = Math.max(0, dragDepth.current - 1)
+        if (!dragDepth.current) setDragActive(false)
+      }}
+      onDrop={(event) => {
+        event.preventDefault()
+        dragDepth.current = 0
+        setDragActive(false)
+        if (!isUploading) onUpload(event.dataTransfer.files?.[0] || null)
+      }}>
+      <PaperScene busy={isUploading} dragging={dragActive} />
+      <div className="mw-core">
+        <div className="mw-title-block">
+          <h1>Moonwalk</h1>
+          <p>知识检测与开放式追问</p>
+        </div>
+        <div className="mw-upload" aria-busy={isUploading}>
           <input
             ref={inputRef}
             type="file"
@@ -732,36 +757,31 @@ function UploadView({
             onChange={onFileChange}
             hidden
           />
-          <div className="upload-icon" aria-hidden="true">
-            {isUploading ? <Loader2 className="spin" size={34} /> : <UploadCloud size={36} />}
-          </div>
-          <h2>{isUploading ? '正在识别材料' : '上传学习材料'}</h2>
-          <p>
-            {isUploading
-              ? `正在提取材料文字并调用 ${getAiProviderLabel(health, selectedAiProvider)} 分析，请稍等。`
-              : '拖拽文件到这里，或点击按钮选择文件。'}
-          </p>
-          <button className="primary-button" disabled={isUploading} onClick={() => inputRef.current?.click()}>
-            {isUploading ? '分析中' : '选择文件'}
-            {!isUploading && <ChevronRight size={18} />}
+          <button className="mw-upload-button" disabled={isUploading} onClick={() => inputRef.current?.click()}>
+            {isUploading ? <Loader2 className="spin" size={22} /> : <UploadCloud size={22} />}
+            <span>{isUploading ? '正在识别材料' : dragActive ? '松开以上传材料' : '上传学习材料'}</span>
+            {!isUploading && <ArrowRight size={20} />}
           </button>
-          <div className="limit-grid">
-            <span>PDF / DOCX / PPTX</span>
-            <span>单文件不超过 {health?.limits.maxFileSizeMB || 50}MB</span>
-            <span>PDF 不超过 {health?.limits.maxPdfPages || 100} 页</span>
-            <span>PPTX 不超过 {health?.limits.maxPptxSlides || 100} 页</span>
+          <p className="mw-upload-hint" role="status">
+            {isUploading
+              ? `${getAiProviderLabel(health, selectedAiProvider)} 正在分析，请稍等。`
+              : dragActive ? '文件准备就绪' : '或将文件拖入此页'}
+          </p>
+          <div className="mw-file-types" aria-label="支持的文件类型">
+            <span className="mw-format-pdf">PDF</span>
+            <span className="mw-format-docx">DOCX</span>
+            <span className="mw-format-pptx">PPTX</span>
           </div>
+          <p className="mw-file-limit">单文件 ≤ {health?.limits.maxFileSizeMB || 50} MB <span>/</span> PDF ≤ {health?.limits.maxPdfPages || 100} 页 <span>/</span> PPTX ≤ {health?.limits.maxPptxSlides || 100} 页</p>
         </div>
-      </div>
-
-      <AiProviderSelector
+        <AiProviderSelector
         health={health}
         selectedAiProvider={selectedAiProvider}
         setSelectedAiProvider={setSelectedAiProvider}
         disabled={isUploading}
       />
 
-      <StatusStrip health={health} selectedAiProvider={selectedAiProvider} />
+        <StatusStrip health={health} selectedAiProvider={selectedAiProvider} />
       {error && (
         <ErrorNotice
           message={error}
@@ -769,6 +789,15 @@ function UploadView({
           onAction={selectedAiProvider === 'openai' ? onSwitchToDeepSeek : undefined}
         />
       )}
+      </div>
+      <nav className="mw-journey" aria-label="学习流程">
+        {['上传材料', '确认摘要', '开始答题', '查看解析'].map((label, index) => (
+          <div className={index === 0 ? 'is-current' : ''} key={label} aria-current={index === 0 ? 'step' : undefined}>
+            <span className="mw-step-number">0{index + 1}</span><span>{label}</span>
+            {index < 3 && <ArrowRight size={14} aria-hidden="true" />}
+          </div>
+        ))}
+      </nav>
     </section>
   )
 }
@@ -801,7 +830,8 @@ function AiProviderSelector({
             onClick={() => setSelectedAiProvider(provider.id)}
           >
             <strong>{provider.label}</strong>
-            <small>{provider.configured ? (selectedAiProvider === provider.id ? '已选择' : '可用') : '未配置'}</small>
+            <span className="mw-provider-check" aria-hidden="true">{selectedAiProvider === provider.id && <Check size={12} />}</span>
+            {!provider.configured && <small>未配置</small>}
           </button>
         ))}
       </div>
