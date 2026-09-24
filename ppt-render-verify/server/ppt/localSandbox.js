@@ -52,6 +52,8 @@ export async function sandboxRun(config, args, { signal, input, timeout = 90000 
 function runSandbox(config, invocation, { signal, input, timeout }) {
   signal?.throwIfAborted()
   return new Promise((resolve, reject) => {
+    const diagnostic = process.env.PPT_RUNTIME_DIAGNOSTICS === 'true'
+    if (diagnostic) console.error('[ppt-worker] start', path.basename(invocation.args.at(-1) || invocation.command))
     const child = spawn(invocation.command, invocation.args, {
       cwd: config.project, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
       ...(invocation.uid !== undefined ? { uid: invocation.uid, gid: invocation.gid } : {}),
@@ -61,11 +63,21 @@ function runSandbox(config, invocation, { signal, input, timeout }) {
         ...(config.browserRoot ? { PLAYWRIGHT_BROWSERS_PATH: config.browserRoot } : {}) },
     })
     const chunks = [], errors = []
-    let size = 0, killed = false
-    const stop = () => { killed = true; try { process.kill(-child.pid, 'SIGKILL') } catch { /* Already stopped. */ } }
+    let size = 0, killed = false, escalation
+    const killGroup = () => { try { process.kill(-child.pid, 'SIGKILL') } catch { /* Already stopped. */ } }
+    const stop = () => {
+      if (killed) return
+      killed = true
+      if (process.platform === 'linux') {
+        // Let the supervisor kill namespace PID 1 first, including detached
+        // descendants. Killing only the outer process group can leave pipes open.
+        child.kill('SIGTERM')
+        escalation = setTimeout(killGroup, 2000)
+      } else killGroup()
+    }
     const timer = setTimeout(stop, timeout)
     signal?.addEventListener('abort', stop, { once: true })
-    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', stop) }
+    const cleanup = () => { clearTimeout(timer); clearTimeout(escalation); signal?.removeEventListener('abort', stop) }
     for (const stream of [child.stdout, child.stderr]) stream.on('data', (chunk) => {
       size += chunk.length
       if (size > 2 * 1024 * 1024) stop()
@@ -74,6 +86,7 @@ function runSandbox(config, invocation, { signal, input, timeout }) {
     child.on('error', (error) => { cleanup(); reject(error) })
     child.on('close', (code, exitSignal) => {
       cleanup()
+      if (diagnostic) console.error('[ppt-worker] close', code, exitSignal, killed ? 'cancelled' : '')
       if (signal?.aborted) return reject(signal.reason)
       if (killed) return reject(new ProjectError('原生制作工具超过时间或输出上限，任务已停止。', 409))
       resolve({ code: code ?? 128, output: Buffer.concat(chunks).toString('utf8'), error: `${Buffer.concat(errors).toString('utf8').slice(-12000)}${exitSignal ? `\nStopped: ${exitSignal}` : ''}` })

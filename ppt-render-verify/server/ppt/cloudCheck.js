@@ -23,6 +23,7 @@ export async function checkCloudWorker(store, { python, skillRoot }) {
       'from pathlib import Path; Path("confirm_ui/result.json").write_text("bad")',
       'from pathlib import Path; Path("confirm_ui").rename("receipt-replaced")',
       'import socket; socket.socket().bind(("127.0.0.1",0))',
+      'import socket; socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)',
       'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.sendto(b"probe",("1.1.1.1",53))',
     ]) {
       const result = await sandboxRun(config, ['-c', code], { timeout: 5000 })

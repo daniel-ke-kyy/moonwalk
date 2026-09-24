@@ -5,11 +5,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"syscall"
 
 	seccomp "github.com/elastic/go-seccomp-bpf"
@@ -104,6 +106,11 @@ func restrictions(p policy) error {
 				"open_by_handle_at", "name_to_handle_at", "bpf", "perf_event_open",
 				"userfaultfd", "io_uring_setup", "kexec_load", "init_module", "finit_module", "delete_module",
 			},
+			// ABI 4 does not control pathname UNIX sockets. Keep socketpair for
+			// local pipes/Chromium IPC, but deny opening connections to host sockets.
+			NamesWithCondtions: []seccomp.NameWithConditions{{Name: "socket", Conditions: seccomp.ArgumentConditions{
+				{Argument: 0, Operation: seccomp.Equal, Value: unix.AF_UNIX},
+			}}},
 		}}},
 	})
 }
@@ -139,7 +146,9 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
-		cmd := exec.Command(executable, append([]string{"--inner"}, os.Args[1:]...)...)
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		cmd := exec.CommandContext(ctx, executable, append([]string{"--inner"}, os.Args[1:]...)...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		cmd.Env = os.Environ()
 		cmd.SysProcAttr = &syscall.SysProcAttr{

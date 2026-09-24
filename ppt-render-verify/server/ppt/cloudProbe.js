@@ -8,6 +8,7 @@ const files = (await readdir('server/ppt')).filter((name) => name.endsWith('.tes
 const child = spawn(process.execPath, ['--test', '--test-concurrency=1', ...files], {
   stdio: ['ignore', 'pipe', 'pipe'],
   env: { PATH: process.env.PATH, LANG: 'C.UTF-8', HOME: '/tmp', NODE_ENV: 'test',
+    PPT_RUNTIME_DIAGNOSTICS: 'true',
     PPT_MASTER_SKILL_ROOT: process.env.PPT_MASTER_SKILL_ROOT, PPT_PYTHON: process.env.PPT_PYTHON,
     PPT_BROWSER_ROOT: process.env.PPT_BROWSER_ROOT, PPT_LINUX_SANDBOX: process.env.PPT_LINUX_SANDBOX },
 })
