@@ -2,6 +2,8 @@
 import json
 import os
 import subprocess
+import tempfile
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
@@ -31,6 +33,32 @@ results = {
         "/bin/sh", "-c", "test ! -e /probe/probe.py && echo isolated-worker-ready"
     ]),
 }
+print(json.dumps(results), flush=True)
+
+root = Path(tempfile.mkdtemp(prefix="ppt-probe-"))
+root.chmod(0o755)
+(root / "secret").write_text("probe-only-secret")
+(root / "secret").chmod(0o600)
+work = root / "project"
+work.mkdir(mode=0o1770)
+work.chmod(0o1770)
+os.chown(work, 0, 65534)
+out = work / "output"
+out.mkdir(mode=0o700)
+os.chown(out, 65534, 65534)
+policy = json.dumps({"read": ["/usr", "/lib", "/lib64", "/proc", str(work), "/dev/urandom"],
+                     "write": [str(work), "/dev/null"], "port": 0})
+try:
+    result = subprocess.run(["/usr/local/bin/ppt-sandbox", policy, "/usr/local/bin/python", "-c",
+        "import pathlib,socket; p=pathlib.Path('output/pass'); p.write_text('ok'); "
+        "assert p.read_text()=='ok'; "
+        "print('worker-started', flush=True); "
+        f"pathlib.Path({str(root / 'secret')!r}).read_text()"],
+        cwd=work, user=65534, group=65534, extra_groups=[], capture_output=True,
+        text=True, timeout=20, env={"PATH":"/usr/local/bin:/usr/bin:/bin", "HOME":str(out), "TMPDIR":str(out)})
+    results["landlock_worker"] = {"code":result.returncode, "stdout":result.stdout[-2000:], "stderr":result.stderr[-2000:]}
+except Exception as error:
+    results["landlock_worker"] = {"error":str(error)}
 print(json.dumps(results), flush=True)
 
 
