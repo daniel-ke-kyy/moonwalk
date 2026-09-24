@@ -79,6 +79,7 @@ export function PptWorkspace({ provider, onBack }: { provider: Provider; onBack:
   const [confirmAttempt, setConfirmAttempt] = useState(0)
   const [available, setAvailable] = useState<boolean | null>(null)
   const [temporaryStorage, setTemporaryStorage] = useState(false)
+  const [executionEnvironment, setExecutionEnvironment] = useState('')
   const [authoringAvailable, setAuthoringAvailable] = useState(false)
   const [postprocessAvailable, setPostprocessAvailable] = useState(false)
   const [visualAvailable, setVisualAvailable] = useState(false)
@@ -103,8 +104,9 @@ export function PptWorkspace({ provider, onBack }: { provider: Provider; onBack:
 
   useEffect(() => {
     let alive = true
-    api<{ storageMode?: string; nativePlanning: boolean; nativeAuthoring: boolean; nativePostprocess: boolean; nativeVisualReview: boolean; nativeRevision: boolean; nativeSpecReview: boolean }>('/capabilities').then((result) => {
+    api<{ executionEnvironment?: string; storageMode?: string; nativePlanning: boolean; nativeAuthoring: boolean; nativePostprocess: boolean; nativeVisualReview: boolean; nativeRevision: boolean; nativeSpecReview: boolean }>('/capabilities').then((result) => {
       if (alive) setTemporaryStorage(result.storageMode === 'temporary')
+      if (alive) setExecutionEnvironment(result.executionEnvironment || '')
       if (alive) { setAvailable(result.nativePlanning); setAuthoringAvailable(result.nativeAuthoring); setPostprocessAvailable(result.nativePostprocess); setVisualAvailable(result.nativeVisualReview); setRevisionAvailable(result.nativeRevision); setSpecAvailable(result.nativeSpecReview) }
     }).catch(() => { if (alive) setAvailable(false) })
     if (initial.imported) {
@@ -241,7 +243,7 @@ export function PptWorkspace({ provider, onBack }: { provider: Provider; onBack:
       <span className="ppt-brand">Moonwalk</span>
       <span className="ppt-provider">{(project?.aiProvider || provider) === 'openai' ? 'GPT-5.6 Sol' : 'DeepSeek-V4.1-Flash'}</span>
     </header>
-    <div className="ppt-heading"><h1>PPT 制作</h1><span>本地验证 · {postprocessAvailable ? '原生制作与导出' : authoringAvailable ? '原生逐页制作' : '原生两阶段规划'}</span></div>
+    <div className="ppt-heading"><h1>PPT 制作</h1><span>{executionEnvironment === 'cloud' ? '云端执行' : executionEnvironment === 'local' ? '本地验证' : '连接后台'} · {postprocessAvailable ? '原生制作与导出' : authoringAvailable ? '原生逐页制作' : '原生两阶段规划'}</span></div>
     {available === false && <p className="ppt-message" role="alert">当前环境未启用原生规划。项目制作暂不可用。</p>}
     {temporaryStorage && <p className="ppt-message" role="status">项目仅临时保存，不保证保留七天。服务器休眠、重启或部署会清空材料和结果；制作期间请保持页面打开，完成后及时下载。保持页面打开也不能保证任务不中断。</p>}
     {error && <p className="ppt-error" role="alert">{error}</p>}

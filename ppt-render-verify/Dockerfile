@@ -37,4 +37,4 @@ ENV PPT_MASTER_SKILL_ROOT=/app/.ppt-runtime/ppt-master/skills/ppt-master \
     PPT_LINUX_SANDBOX=/usr/local/bin/ppt-sandbox
 RUN npm run build
 
-CMD ["node", "server/ppt/cloudProbe.js"]
+CMD ["npm", "start"]

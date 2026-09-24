@@ -21,7 +21,8 @@ export async function createPptRouter(store, { controller = null } = {}) {
   })
   router.get('/capabilities', (_req, res) => {
     res.json({
-      projectStorage: true, nativeExecution: false, nativeSpecReview: Boolean(controller?.specRuntime), nativeRevision: Boolean(controller?.revisionRuntime), nativeVisualReview: Boolean(controller?.visualRuntime), nativePostprocess: Boolean(controller?.postprocessRuntime), nativeAuthoring: Boolean(controller?.authoringRuntime), nativePlanning: Boolean(controller), retentionDays: 7,
+      projectStorage: true, nativeExecution: Boolean(controller?.authoringRuntime && controller?.postprocessRuntime), nativeSpecReview: Boolean(controller?.specRuntime), nativeRevision: Boolean(controller?.revisionRuntime), nativeVisualReview: Boolean(controller?.visualRuntime), nativePostprocess: Boolean(controller?.postprocessRuntime), nativeAuthoring: Boolean(controller?.authoringRuntime), nativePlanning: Boolean(controller), retentionDays: 7,
+      executionEnvironment: controller ? (process.env.NODE_ENV === 'production' ? 'cloud' : 'local') : 'unavailable',
       storageMode: store.storageMode,
       ...store.storageMode === 'temporary' ? { retentionDays: null } : {},
       supportedExtensions: ['.pdf', '.docx', '.pptx'],
