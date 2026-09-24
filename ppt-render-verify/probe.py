@@ -17,6 +17,12 @@ def check(args):
 
 results = {
     "user_namespace": check(["unshare", "--user", "--map-root-user", "true"]),
+    "mount_namespace": check(["unshare", "--user", "--map-root-user", "--mount", "true"]),
+    "network_namespace": check(["unshare", "--user", "--map-root-user", "--net", "true"]),
+    "mount_isolation": check(["unshare", "--user", "--map-root-user", "--mount",
+                              "sh", "-c", "mount --make-rslave /"]),
+    "landlock_abi": check(["/usr/local/bin/python", "-c",
+        "import ctypes,os; c=ctypes.CDLL(None,use_errno=True); r=c.syscall(444,0,0,1); print({'abi':r,'errno':ctypes.get_errno()})"]),
     "isolated_worker": check([
         "bwrap", "--unshare-all", "--die-with-parent", "--new-session",
         "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
