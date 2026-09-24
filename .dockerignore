@@ -1,7 +1,10 @@
 node_modules
 dist
 .git
-.env
+.env*
+!.env.example
+.ppt-data
+.ppt-runtime
 .npm-cache
 work
 *.log

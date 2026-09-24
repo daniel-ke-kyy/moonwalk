@@ -9,6 +9,15 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { nanoid } from 'nanoid'
+import { openProjectStorage } from './ppt/storage.js'
+import { checkCloudWorker } from './ppt/cloudCheck.js'
+import { createPptRouter } from './ppt/router.js'
+import { NativeRuntime } from './ppt/nativeRuntime.js'
+import { PlanningController } from './ppt/planningController.js'
+import { AuthoringRuntime } from './ppt/authoringRuntime.js'
+import { PostprocessRuntime } from './ppt/postprocessRuntime.js'
+import { VisualRuntime } from './ppt/visualRuntime.js'
+import { RevisionRuntime } from './ppt/revisionRuntime.js'
 import {
   DEFAULT_AI_PROVIDER,
   assertAiProviderReady,
@@ -44,6 +53,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const distDir = path.resolve(__dirname, '../dist')
 const uploadRoot = await mkdtemp(path.join(os.tmpdir(), 'material-quiz-uploads-'))
 const sessions = new Map()
+let pptController
+let pptStorage
 const accessPassword = String(process.env.ACCESS_PASSWORD || '').trim()
 const accessAuthEnabled = Boolean(accessPassword)
 const accessCookieName = 'moonwalk_access'
@@ -120,6 +131,36 @@ app.post('/api/auth/logout', (_req, res) => {
 })
 
 app.use('/api', requireAccess)
+
+// Opt-in until the isolated native worker and confirmation proxy are ready.
+if (process.env.PPT_PROJECTS_ENABLED === 'true') {
+  pptStorage = await openProjectStorage({ localRoot: path.resolve(__dirname, '../.ppt-data') })
+  const pptStore = pptStorage.store
+  if (process.env.PPT_NATIVE_PLANNING_ENABLED === 'true') {
+    if (process.env.NODE_ENV === 'production' && (process.platform !== 'linux' || process.env.PPT_CLOUD_EXECUTION_ENABLED !== 'true')) {
+      throw new Error('Production PPT execution requires the checked Linux cloud worker')
+    }
+    if (!process.env.PPT_MASTER_SKILL_ROOT || !process.env.PPT_PYTHON) throw new Error('PPT_MASTER_SKILL_ROOT and PPT_PYTHON are required')
+    const runtime = new NativeRuntime(pptStore, { skillRoot: process.env.PPT_MASTER_SKILL_ROOT, python: process.env.PPT_PYTHON })
+    await runtime.check()
+    if (process.platform === 'linux') await checkCloudWorker(pptStore, runtime)
+    const authoringRuntime = process.env.PPT_NATIVE_AUTHORING_ENABLED === 'true' ? new AuthoringRuntime(runtime) : null
+    if (authoringRuntime && !['darwin', 'linux'].includes(process.platform)) throw new Error('Native worker requires macOS local verification or the Linux cloud image; clients can use any modern browser')
+    const postprocessRuntime = authoringRuntime && process.env.PPT_NATIVE_POSTPROCESS_ENABLED === 'true' ? new PostprocessRuntime(runtime) : null
+    const visualRuntime = postprocessRuntime && process.env.PPT_NATIVE_VISUAL_REVIEW_ENABLED === 'true' ? new VisualRuntime(runtime, {
+      browserRoot: process.env.PPT_BROWSER_ROOT || path.resolve(__dirname, '../.ppt-runtime/browsers'),
+    }) : null
+    const revisionRuntime = postprocessRuntime ? new RevisionRuntime(runtime) : null
+    pptController = new PlanningController(pptStore, runtime, { authoringRuntime, postprocessRuntime, visualRuntime, revisionRuntime })
+    await pptController.recover()
+  }
+  await pptStore.cleanupExpired()
+  app.use('/api/ppt', await createPptRouter(pptStore, { controller: pptController }))
+  const cleanupTimer = setInterval(() => {
+    pptStore.cleanupExpired().catch(() => console.error('PPT project cleanup failed'))
+  }, 60 * 60 * 1000)
+  cleanupTimer.unref()
+}
 
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
@@ -273,7 +314,7 @@ if (existsSync(distDir)) {
   })
 }
 
-app.listen(port, () => {
+app.listen(port, process.env.PPT_NATIVE_PLANNING_ENABLED === 'true' && process.env.NODE_ENV !== 'production' ? '127.0.0.1' : '0.0.0.0', () => {
   console.log(`Material quiz API is running at http://localhost:${port}`)
 })
 
@@ -281,6 +322,8 @@ process.on('SIGINT', cleanupAndExit)
 process.on('SIGTERM', cleanupAndExit)
 
 async function cleanupAndExit() {
+  await pptController?.close()
+  await pptStorage?.close()
   await rm(uploadRoot, { recursive: true, force: true }).catch(() => {})
   process.exit(0)
 }

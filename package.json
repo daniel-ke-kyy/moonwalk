@@ -4,6 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "setup:ppt-planning": "node server/ppt/setupPlanning.js",
+    "setup:ppt-visual": "node server/ppt/setupVisual.js",
     "dev": "concurrently \"npm:dev:api\" \"npm:dev:web\"",
     "dev:web": "vite",
     "dev:api": "node server/index.js",

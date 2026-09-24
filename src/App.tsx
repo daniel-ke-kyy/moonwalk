@@ -15,6 +15,7 @@ import {
 import './App.css'
 import './Home.css'
 import { PaperScene } from './PaperScene'
+import { PptWorkspace } from './PptWorkspace'
 
 type Importance = 'high' | 'medium' | 'low'
 type Difficulty = '简单' | '中等' | '困难'
@@ -192,6 +193,8 @@ const importanceLabels: Record<Importance, string> = {
 }
 
 function App() {
+  const [pptOpen, setPptOpen] = useState(() => window.location.pathname === '/ppt')
+  const [pptEnabled, setPptEnabled] = useState(false)
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
   const [authError, setAuthError] = useState('')
   const [isAuthenticating, setIsAuthenticating] = useState(false)
@@ -220,6 +223,22 @@ function App() {
   const [isReviewingOpen, setIsReviewingOpen] = useState(false)
   const [error, setError] = useState('')
   const [missingIds, setMissingIds] = useState<string[]>([])
+
+  useEffect(() => {
+    const navigate = () => setPptOpen(window.location.pathname === '/ppt')
+    window.addEventListener('popstate', navigate)
+    return () => window.removeEventListener('popstate', navigate)
+  }, [])
+
+  useEffect(() => {
+    if (!authStatus?.authenticated) return
+    let active = true
+    fetch('/api/ppt/capabilities', { credentials: 'include' })
+      .then((response) => response.ok ? response.json() : null)
+      .then((value) => { if (active) setPptEnabled(Boolean(value?.nativePlanning)) })
+      .catch(() => {})
+    return () => { active = false }
+  }, [authStatus?.authenticated])
 
   useEffect(() => {
     fetchJson<AuthStatus>('/api/auth/status')
@@ -479,6 +498,8 @@ function App() {
     )
   }
 
+  if (pptOpen) return <PptWorkspace provider={selectedAiProvider} onBack={() => { history.pushState(null, '', '/'); setPptOpen(false) }} />
+
   return (
     <main className={`app-shell ${step === 'upload' ? 'mw-home-shell' : ''}`}>
       <TopBar currentStep={step} showLogout={authStatus.required} onLogout={handleLogout} />
@@ -494,6 +515,12 @@ function App() {
           onUpload={handleUpload}
         />
       )}
+
+      {step === 'upload' && pptEnabled && <section className="mw-ppt-entry">
+        <button disabled={isUploading} onClick={() => { history.pushState(null, '', '/ppt'); setPptOpen(true) }}>
+          <strong>PPT 制作</strong><span>新建演示文稿</span><ArrowRight size={20} />
+        </button>
+      </section>}
 
       {step === 'summary' && uploadResult && (
         <SummaryView

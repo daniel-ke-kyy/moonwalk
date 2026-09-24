@@ -13,7 +13,10 @@ dist-ssr
 *.local
 __pycache__/
 *.pyc
-.env
+.env*
+!.env.example
+.ppt-data/
+.ppt-runtime/
 
 # Editor directories and files
 .vscode/*
