@@ -29,7 +29,7 @@ async function permissions(target, writable) {
   if (info.isDirectory()) for (const entry of await readdir(target)) await permissions(path.join(target, entry), writable)
 }
 
-export async function linuxInvocation(config, args) {
+export async function linuxInvocation(config, args, timeout) {
   if (process.platform !== 'linux' || process.getuid?.() !== 0) {
     throw new ProjectError('云端工具身份隔离尚未配置，未执行制作工具。', 503)
   }
@@ -72,7 +72,7 @@ export async function linuxInvocation(config, args) {
   }
   return {
     command: process.env.PPT_LINUX_SANDBOX || '/usr/local/bin/ppt-sandbox',
-    args: [JSON.stringify({ read, write: [root, '/dev/null'], port: config.renderPort || 0 }), config.python, ...args],
+    args: [JSON.stringify({ read, write: [root, '/dev/null'], port: config.renderPort || 0, timeoutMillis: timeout + 2000 }), config.python, ...args],
     uid: WORKER_UID, gid: WORKER_UID,
   }
 }

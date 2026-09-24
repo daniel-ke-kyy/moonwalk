@@ -43,7 +43,7 @@ ${specReview ? `(allow file-write* (regex ${quote('^' + root.replace(/[.*+?^${}(
 export async function sandboxRun(config, args, { signal, input, timeout = 90000 } = {}) {
   if (process.platform === 'linux') return withLinuxWorkspace(config, async () => {
     signal?.throwIfAborted()
-    return runSandbox(config, await linuxInvocation(config, args), { signal, input, timeout })
+    return runSandbox(config, await linuxInvocation(config, args, timeout), { signal, input, timeout })
   })
   const profile = await sandboxProfile(config)
   return runSandbox(config, { command: '/usr/bin/sandbox-exec', args: ['-p', profile, config.python, ...args] }, { signal, input, timeout })
@@ -55,7 +55,7 @@ function runSandbox(config, invocation, { signal, input, timeout }) {
     const diagnostic = process.env.PPT_RUNTIME_DIAGNOSTICS === 'true'
     if (diagnostic) console.error('[ppt-worker] start', path.basename(invocation.args.at(-1) || invocation.command))
     const child = spawn(invocation.command, invocation.args, {
-      cwd: config.project, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: config.project, detached: true, stdio: process.platform === 'linux' ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'],
       ...(invocation.uid !== undefined ? { uid: invocation.uid, gid: invocation.gid } : {}),
       env: { PATH: '/usr/bin:/bin', LANG: 'en_US.UTF-8', PYTHONDONTWRITEBYTECODE: '1',
         PYTHONIOENCODING: 'utf-8', HOME: path.join(config.project, '.worker-tmp'),
@@ -63,21 +63,21 @@ function runSandbox(config, invocation, { signal, input, timeout }) {
         ...(config.browserRoot ? { PLAYWRIGHT_BROWSERS_PATH: config.browserRoot } : {}) },
     })
     const chunks = [], errors = []
-    let size = 0, killed = false, escalation
+    let size = 0, killed = false
     const killGroup = () => { try { process.kill(-child.pid, 'SIGKILL') } catch { /* Already stopped. */ } }
     const stop = () => {
       if (killed) return
       killed = true
       if (process.platform === 'linux') {
-        // Let the supervisor kill namespace PID 1 first, including detached
-        // descendants. Killing only the outer process group can leave pipes open.
-        child.kill('SIGTERM')
-        escalation = setTimeout(killGroup, 2000)
+        // A cross-UID kill is denied on some hosts. The same-UID supervisor
+        // receives cancellation through a private pipe and kills namespace PID 1.
+        child.stdio[3].end('cancel')
       } else killGroup()
     }
     const timer = setTimeout(stop, timeout)
     signal?.addEventListener('abort', stop, { once: true })
-    const cleanup = () => { clearTimeout(timer); clearTimeout(escalation); signal?.removeEventListener('abort', stop) }
+    child.stdio[3]?.on('error', () => {})
+    const cleanup = () => { clearTimeout(timer); child.stdio[3]?.destroy(); signal?.removeEventListener('abort', stop) }
     for (const stream of [child.stdout, child.stderr]) stream.on('data', (chunk) => {
       size += chunk.length
       if (size > 2 * 1024 * 1024) stop()

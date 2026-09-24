@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 
 	seccomp "github.com/elastic/go-seccomp-bpf"
 	"github.com/landlock-lsm/go-landlock/landlock"
@@ -20,9 +22,10 @@ import (
 )
 
 type policy struct {
-	Read  []string `json:"read"`
-	Write []string `json:"write"`
-	Port  int      `json:"port"`
+	Read          []string `json:"read"`
+	Write         []string `json:"write"`
+	Port          int      `json:"port"`
+	TimeoutMillis int      `json:"timeoutMillis"`
 }
 
 func fail(err error) {
@@ -148,6 +151,20 @@ func main() {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 		defer stop()
+		deadline := p.TimeoutMillis
+		if deadline <= 0 {
+			deadline = 122000
+		}
+		ctx, cancel := context.WithTimeout(ctx, time.Duration(deadline)*time.Millisecond)
+		defer cancel()
+		// Render may deny signals from the root web process to a different UID.
+		// A private inherited pipe provides cancellation and detects parent death;
+		// it is not forwarded to the namespace child.
+		control := os.NewFile(3, "cancel")
+		if control == nil {
+			fail(errors.New("missing cancellation channel"))
+		}
+		go func() { var b [1]byte; _, _ = io.ReadFull(control, b[:]); cancel() }()
 		cmd := exec.CommandContext(ctx, executable, append([]string{"--inner"}, os.Args[1:]...)...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		cmd.Env = os.Environ()
