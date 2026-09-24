@@ -47,7 +47,10 @@ export class VisualRuntime extends PostprocessRuntime {
       [bridge, this.native.skillRoot, this.native.projectPath(record), String(renderPort)], {
         signal, input: JSON.stringify({ pages }), timeout: 180000,
       })
-    if (result.code) throw new ProjectError(`原生视觉截图失败，审查未通过：${(result.error || result.output).slice(-1400)}`, 503)
+    if (result.code) {
+      const diagnostic = result.error || result.output
+      throw new ProjectError(`原生视觉截图失败，审查未通过：${diagnostic.slice(0, 1400)}${diagnostic.length > 1400 ? '\n' + diagnostic.slice(-600) : ''}`, 503)
+    }
     const records = JSON.parse(result.output).pages
     for (const page of records) {
       if (!page.ok || page.all_background || !page.canvas?.png_width || !page.canvas?.png_height) throw new ProjectError(`页面 ${page.page} 截图为空白或未成功，不能标记审查通过。`, 409)

@@ -19,7 +19,7 @@ export function mountConfirmationProxy(router, store, controller, bearerToken) {
     const token = bearerToken(req)
     await store.authorize(req.params.id, token)
     const prefix = `/api/ppt/projects/${req.params.id}/native`
-    res.cookie(cookieName(req.params.id), token, { httpOnly: true, sameSite: 'strict', secure: req.secure, path: prefix })
+    res.cookie(cookieName(req.params.id), token, { httpOnly: true, sameSite: 'strict', secure: req.secure || process.env.NODE_ENV === 'production', path: prefix })
     res.json({ url: `${prefix}/` })
   })
   router.use('/projects/:id/native', async (req, res) => {

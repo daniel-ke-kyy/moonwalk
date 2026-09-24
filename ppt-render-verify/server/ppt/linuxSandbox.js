@@ -10,7 +10,9 @@ const locks = new Map()
 // Permission changes and native writes for the same workspace must not race a
 // preview request. Different projects remain independent; there is no job cap.
 export async function withLinuxWorkspace(config, action) {
-  const key = config.project.split(`${path.sep}workspace${path.sep}`)[0]
+  const marker = `${path.sep}workspace`
+  const index = config.project.lastIndexOf(marker)
+  const key = index === -1 ? config.project : config.project.slice(0, index + marker.length)
   const previous = locks.get(key) || Promise.resolve()
   const current = previous.catch(() => {}).then(action)
   locks.set(key, current)
@@ -52,7 +54,8 @@ export async function linuxInvocation(config, args) {
   const python = await realpath(config.python)
   const candidates = [
     '/usr', '/bin', '/lib', '/lib64', '/proc', '/etc/fonts', '/etc/ld.so.cache',
-    '/etc/localtime', '/etc/nsswitch.conf', '/etc/passwd', '/etc/group',
+    '/etc/localtime', '/etc/nsswitch.conf', '/etc/passwd', '/etc/group', '/etc/mime.types', '/etc/apache2/mime.types',
+    '/etc/ssl/openssl.cnf', '/etc/ssl/certs',
     '/sys/devices/system/cpu', '/sys/devices/system/node', '/sys/fs/cgroup',
     '/var/cache/fontconfig', '/dev/urandom', '/dev/random',
     path.dirname(path.dirname(python)), path.dirname(path.dirname(path.resolve(config.python))),

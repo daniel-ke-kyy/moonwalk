@@ -51,7 +51,7 @@ export function mountPreviewProxy(router, store, controller, bearerToken) {
     const record = await store.authorize(req.params.id, token)
     await controller.authoringRuntime.verifyConfirmation(record)
     const prefix = `/api/ppt/projects/${record.id}/preview`
-    res.cookie(cookieName(record.id), token, { httpOnly: true, sameSite: 'strict', secure: req.secure, path: prefix })
+    res.cookie(cookieName(record.id), token, { httpOnly: true, sameSite: 'strict', secure: req.secure || process.env.NODE_ENV === 'production', path: prefix })
     res.json({ url: `${prefix}/`, annotations: canAnnotate(record, controller) })
   })
   router.use('/projects/:id/preview', async (req, res) => {

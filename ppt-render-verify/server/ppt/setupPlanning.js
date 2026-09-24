@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { NATIVE_REVISION } from './nativeRuntime.js'
+import { NATIVE_REVISION } from './nativeRevision.js'
 
 const root = fileURLToPath(new URL('../../.ppt-runtime/', import.meta.url))
 const repository = path.join(root, 'ppt-master')

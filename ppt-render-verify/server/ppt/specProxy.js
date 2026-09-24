@@ -16,7 +16,7 @@ export function mountSpecProxy(router, store, controller, token) {
     const record = await store.authorize(req.params.id, value)
     if (!record.specReview) throw new ProjectError('完整规范尚未打开。', 409)
     const prefix = '/api/ppt/projects/' + record.id + '/spec-native'
-    res.cookie('mw_spec_' + record.id, value, { httpOnly: true, sameSite: 'strict', secure: req.secure, path: prefix })
+    res.cookie('mw_spec_' + record.id, value, { httpOnly: true, sameSite: 'strict', secure: req.secure || process.env.NODE_ENV === 'production', path: prefix })
     res.json({ url: prefix + '/' })
   })
   router.use('/projects/:id/spec-native', async (req, res) => store.locked(req.params.id, async () => {

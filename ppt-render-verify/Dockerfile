@@ -24,12 +24,13 @@ RUN apt-get update \
 COPY package*.json ./
 RUN npm ci --include=dev
 
-COPY . .
-COPY --from=ppt-sandbox /ppt-sandbox /usr/local/bin/ppt-sandbox
+COPY server/ppt/setupPlanning.js server/ppt/nativeRevision.js server/ppt/planning-requirements.txt ./server/ppt/
 RUN npm run setup:ppt-planning \
   && .ppt-runtime/venv/bin/python -m pip install playwright==1.58.0 \
   && PLAYWRIGHT_BROWSERS_PATH=/app/.ppt-runtime/browsers .ppt-runtime/venv/bin/python -m playwright install --with-deps chromium --only-shell \
   && chmod 755 /app/.ppt-runtime
+COPY . .
+COPY --from=ppt-sandbox /ppt-sandbox /usr/local/bin/ppt-sandbox
 ENV PPT_MASTER_SKILL_ROOT=/app/.ppt-runtime/ppt-master/skills/ppt-master \
     PPT_PYTHON=/app/.ppt-runtime/venv/bin/python \
     PPT_BROWSER_ROOT=/app/.ppt-runtime/browsers \

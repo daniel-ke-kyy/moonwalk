@@ -5,7 +5,8 @@ import path from 'node:path'
 import { ProjectError } from './projectStore.js'
 import { sandboxRun } from './localSandbox.js'
 
-export const NATIVE_REVISION = '481e057ecd9f5ff094c9c789b17b2d1331e278e8'
+import { NATIVE_REVISION } from './nativeRevision.js'
+export { NATIVE_REVISION } from './nativeRevision.js'
 const bridge = fileURLToPath(new URL('./nativeBridge.py', import.meta.url))
 
 export async function confined(root, relative) {

@@ -120,7 +120,7 @@ export class AuthoringRuntime {
     })
     if (result.code) throw new ProjectError('原生预览读取失败，请检查制作运行环境。', 502)
     const response = JSON.parse(result.output)
-    if (response.status >= 500) throw new ProjectError('原生预览服务出错，请检查本地运行环境后重试。', 502)
+    if (response.status >= 500) throw new ProjectError(`原生预览服务出错：${result.error.slice(-1200) || '请检查运行环境后重试。'}`, 502)
     return { ...response, body: Buffer.from(response.body, 'base64') }
   }
   async snapshot(record) {
