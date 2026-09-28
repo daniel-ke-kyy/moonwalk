@@ -33,7 +33,7 @@ export async function createPptRouter(store, { controller = null } = {}) {
     res.status(201).json(await store.create(req.body || {}))
   })
   router.get('/projects/:id', async (req, res) => {
-    res.json(await store.get(req.params.id, token(req)))
+    res.json(controller ? await controller.recoverUnsupportedSpec(req.params.id, token(req)) : await store.get(req.params.id, token(req)))
   })
   router.post('/projects/:id/files', async (req, res, next) => {
     await store.authorize(req.params.id, token(req))

@@ -68,6 +68,22 @@ export class PlanningController {
     await this.store.save(record)
   }
 
+  async recoverUnsupportedSpec(id, token) {
+    return this.store.locked(id, async () => {
+      const record = await this.store.authorize(id, token)
+      const finalReceipt = record.confirmations.find((item) => item.stage === 2)?.receipt
+      const unsupportedSpec = Boolean(finalReceipt?.refine_spec && (finalReceipt.proactive_narration_audio || finalReceipt.generation_mode !== 'continuous'))
+      if (unsupportedSpec && ['preparing_spec', 'awaiting_spec_review'].includes(record.status) && !record.specApproval && !this.jobs.has(id)) {
+        record.status = 'planning_complete'
+        record.activeStage = null
+        record.specReview = null
+        record.error = '已跳过当前未接通的旁白或分段规范审阅，将按已确认内容继续逐页制作。'
+        await this.store.save(record)
+      }
+      return this.store.publicRecord(record)
+    })
+  }
+
   async start(id, token) {
     if (this.closing) throw new ProjectError('服务正在停止，请稍后继续。', 503)
     const record = await this.store.locked(id, async () => {
