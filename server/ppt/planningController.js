@@ -73,7 +73,9 @@ export class PlanningController {
       let stage = ['awaiting_visual_review', 'review_needs_human'].includes(record.status) ? 'visual_review' : record.status === 'draft_ready' ? 'postprocess' : record.status === 'ready_to_export' ? 'export'
         : ['failed', 'paused'].includes(record.status) && ['postprocess', 'export', 'visual_review', 'revision', 'spec'].includes(record.activeStage) ? record.activeStage
           : record.confirmations.some((item) => item.stage === 2) ? 'authoring' : record.confirmations.some((item) => item.stage === 1) ? 2 : 1
-      if (stage === 'authoring' && record.confirmations.find((item) => item.stage === 2)?.receipt.refine_spec && !record.specApproval) {
+      if (stage === 'authoring' && record.confirmations.find((item) => item.stage === 2)?.receipt.refine_spec && !record.specApproval
+        && record.confirmations.find((item) => item.stage === 2)?.receipt.generation_mode === 'continuous'
+        && !record.confirmations.find((item) => item.stage === 2)?.receipt.proactive_narration_audio) {
         record.specReview ||= await this.specRuntime.begin(record)
         stage = 'spec'
       }
@@ -188,7 +190,12 @@ export class PlanningController {
       record.confirmations.push({ stage, at: this.store.now(),
         sha256: createHash('sha256').update(JSON.stringify(receipt)).digest('hex'), receipt })
       const autoAuthor = stage === 2 && this.authoringRuntime && receipt.generation_mode !== 'split'
-      const refine = autoAuthor && receipt.refine_spec
+      // Complete-spec refinement currently cannot execute the native narration or
+      // split-production branches. Keep the confirmed content and continue through
+      // the supported authoring chain instead of sending the user to a review gate
+      // that can only reject the project later.
+      const unsupportedSpecBranch = Boolean(receipt.proactive_narration_audio || receipt.generation_mode !== 'continuous')
+      const refine = autoAuthor && receipt.refine_spec && !unsupportedSpecBranch
       if (refine) record.specReview = await this.specRuntime.begin(record)
       record.status = stage === 1 ? 'preparing_stage2' : refine ? 'preparing_spec' : autoAuthor ? 'preparing_authoring' : 'planning_complete'
       record.activeStage = stage === 1 ? 2 : refine ? 'spec' : autoAuthor ? 'authoring' : null
