@@ -35,6 +35,15 @@ export class PlanningController {
       await this.store.locked(entry.name, async () => {
         const record = await this.store.read(entry.name)
         await this.reconcileReceipt(record)
+        const finalReceipt = record.confirmations.find((item) => item.stage === 2)?.receipt
+        const unsupportedSpec = Boolean(finalReceipt?.refine_spec && (finalReceipt.proactive_narration_audio || finalReceipt.generation_mode !== 'continuous'))
+        if (unsupportedSpec && ['preparing_spec', 'awaiting_spec_review'].includes(record.status) && !record.specApproval) {
+          record.status = 'planning_complete'
+          record.activeStage = null
+          record.specReview = null
+          record.error = '已跳过当前未接通的旁白或分段规范审阅，将按已确认内容继续逐页制作。'
+          await this.store.save(record)
+        }
         if (record.status.startsWith('preparing_')) {
           if (record.activeStage === 'revision' && this.revisionRuntime) await this.revisionRuntime.rollback(record)
           record.status = 'paused'
