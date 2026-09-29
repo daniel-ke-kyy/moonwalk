@@ -36,7 +36,7 @@ export class PlanningController {
         const record = await this.store.read(entry.name)
         await this.reconcileReceipt(record)
         const finalReceipt = record.confirmations.find((item) => item.stage === 2)?.receipt
-        const unsupportedSpec = Boolean(finalReceipt?.refine_spec && (finalReceipt.proactive_narration_audio || finalReceipt.generation_mode !== 'continuous'))
+        const unsupportedSpec = Boolean(finalReceipt && (finalReceipt.proactive_narration_audio || finalReceipt.generation_mode !== 'continuous'))
         if (unsupportedSpec && ['preparing_spec', 'awaiting_spec_review'].includes(record.status) && !record.specApproval) {
           record.status = 'planning_complete'
           record.activeStage = null
@@ -72,7 +72,7 @@ export class PlanningController {
     return this.store.locked(id, async () => {
       const record = await this.store.authorize(id, token)
       const finalReceipt = record.confirmations.find((item) => item.stage === 2)?.receipt
-      const unsupportedSpec = Boolean(finalReceipt?.refine_spec && (finalReceipt.proactive_narration_audio || finalReceipt.generation_mode !== 'continuous'))
+      const unsupportedSpec = Boolean(finalReceipt && (finalReceipt.proactive_narration_audio || finalReceipt.generation_mode !== 'continuous'))
       if (unsupportedSpec && ['preparing_spec', 'awaiting_spec_review'].includes(record.status) && !record.specApproval && !this.jobs.has(id)) {
         record.status = 'planning_complete'
         record.activeStage = null
